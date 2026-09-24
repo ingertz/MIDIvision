@@ -1,5 +1,5 @@
 import mido
-from mido import MidiFile, MidiTrack, Message
+from mido import MidiFile, MidiTrack, Message, MetaMessage
 import sys
 import os
 import re
@@ -285,7 +285,88 @@ class DrumNoteMapper:
         del self.owner[key]
         return [msg.copy(note=key, time=0)]
 
-def extract_single_instrument(mid, inst_key, force_ch0=True):
+def to_absolute(track):
+    """MidiTrack -> [(절대틱, 메시지)]"""
+    abs_tick = 0
+    events = []
+    for msg in track:
+        abs_tick += msg.time
+        events.append((abs_tick, msg))
+    return events
+
+def to_track(events):
+    """[(절대틱, 메시지)] -> MidiTrack (시간순 정렬, 같은 틱이면 기존 순서 유지)"""
+    track = MidiTrack()
+    last = 0
+    for abs_tick, msg in sorted(events, key=lambda e: e[0]):
+        track.append(msg.copy(time=abs_tick - last))
+        last = abs_tick
+    return track
+
+def song_timeline(mid):
+    """원곡 전체의 첫 음 시작 / 마지막 음 시작 / 마지막 음 끝 / 파일 끝 틱"""
+    first_on = last_on = last_off = None
+    song_end = 0
+    for track in mid.tracks:
+        for abs_tick, msg in to_absolute(track):
+            song_end = max(song_end, abs_tick)
+            if msg.type not in ('note_on', 'note_off'):
+                continue
+            if is_note_on(msg):
+                first_on = abs_tick if first_on is None else min(first_on, abs_tick)
+                last_on = abs_tick if last_on is None else max(last_on, abs_tick)
+            else:
+                last_off = abs_tick if last_off is None else max(last_off, abs_tick)
+    if first_on is None:
+        return None
+    if last_off is None or last_off < last_on:
+        last_off = last_on
+    return {'first_on': first_on, 'last_on': last_on, 'last_off': last_off, 'end': song_end}
+
+# 시작/끝 맞춤용 음표 세기 (소리는 거의 안 나지만 게임이 음표로 인식하도록 1)
+ANCHOR_VELOCITY = 1
+
+def align_to_song_timeline(new_mid, part_indices, timeline):
+    """
+    파트별로 분리하면 그 악기의 첫 음/마지막 음 기준으로 곡이 잘려서
+    파트마다 시작·종료 시간이 달라집니다. (예: Melt 드럼 253.7초, 원곡 256.7초)
+    원곡의 첫 음/마지막 음 위치에 아주 약한 음표를 넣고 파일 끝도 원곡과 맞춥니다.
+    """
+    if timeline is None or not part_indices:
+        return
+    all_events = [(i, to_absolute(new_mid.tracks[i])) for i in part_indices]
+    note_ons = [(t, m) for _, evs in all_events for t, m in evs if is_note_on(m)]
+    note_offs = [(t, m) for _, evs in all_events for t, m in evs if is_note_off(m)]
+    if not note_ons:
+        return
+    part_first_tick, part_first_msg = min(note_ons, key=lambda e: e[0])
+    part_last_tick, part_last_msg = max(note_ons, key=lambda e: e[0])
+    part_last_off = max([t for t, _ in note_offs] + [part_last_tick])
+
+    idx, events = all_events[0]
+    ch = part_first_msg.channel
+
+    # 시작 맞춤: 원곡 첫 음 위치에 이 파트의 첫 음과 같은 음 (첫 음 전에 끝나도록 짧게)
+    if part_first_tick > timeline['first_on']:
+        start = timeline['first_on']
+        off = min(start + max(1, new_mid.ticks_per_beat // 16), part_first_tick)
+        events.append((start, Message('note_on', channel=ch, note=part_first_msg.note, velocity=ANCHOR_VELOCITY)))
+        events.append((off, Message('note_off', channel=ch, note=part_first_msg.note, velocity=0)))
+
+    # 끝 맞춤: 원곡 마지막 음 위치에 이 파트의 마지막 음과 같은 음
+    if part_last_off < timeline['last_off']:
+        on = max(timeline['last_on'], part_last_off)
+        off = max(timeline['last_off'], on + 1)
+        events.append((on, Message('note_on', channel=part_last_msg.channel, note=part_last_msg.note, velocity=ANCHOR_VELOCITY)))
+        events.append((off, Message('note_off', channel=part_last_msg.channel, note=part_last_msg.note, velocity=0)))
+
+    # 파일 끝(end_of_track)도 원곡과 동일하게
+    track_end = max(t for t, _ in events) if events else 0
+    events = [(t, m) for t, m in events if m.type != 'end_of_track']
+    events.append((max(timeline['end'], track_end), MetaMessage('end_of_track')))
+    new_mid.tracks[idx] = to_track(events)
+
+def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True):
     """지정된 단일 악기(drum, guitar, bass, keyboard)를 추출하여 새 MidiFile 객체 생성"""
     cfg = INSTRUMENT_CONFIG[inst_key]
     new_mid = MidiFile(type=1)
@@ -297,6 +378,7 @@ def extract_single_instrument(mid, inst_key, force_ch0=True):
 
     total_notes_extracted = 0
     total_mapped = 0
+    part_indices = []
     # 채널 10 드럼이 있는 파일이면 트랙 이름만으로 드럼 판정하지 않음
     # (이름 때문에 멜로디 트랙이 드럼 파일에 섞여 들어가는 것 방지)
     drum_by_name = not file_has_drum_channel(mid)
@@ -375,7 +457,11 @@ def extract_single_instrument(mid, inst_key, force_ch0=True):
                 emit(out)
 
         if has_valid_note:
+            part_indices.append(len(new_mid.tracks))
             new_mid.tracks.append(new_track)
+
+    if align_timeline:
+        align_to_song_timeline(new_mid, part_indices, song_timeline(mid))
 
     return new_mid, total_notes_extracted, total_mapped
 
