@@ -1,18 +1,51 @@
 import os
 import sys
 import threading
+import traceback
 import subprocess
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import customtkinter as ctk
+
+def _app_dir():
+    """exe로 실행하면 exe가 있는 폴더, 아니면 이 스크립트가 있는 폴더"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+ERROR_LOG = os.path.join(_app_dir(), 'Convert_Midi_error.log')
+
+def report_fatal_error(exc_type, exc, tb):
+    """
+    exe(--windowed)는 콘솔이 없어서 오류가 나면 아무 말 없이 꺼집니다.
+    오류 내용을 exe 옆 Convert_Midi_error.log에 저장하고 메시지 창으로도 보여줍니다.
+    """
+    text = ''.join(traceback.format_exception(exc_type, exc, tb))
+    try:
+        with open(ERROR_LOG, 'a', encoding='utf-8') as f:
+            f.write(text + '\n')
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, f"오류가 발생했습니다.\n\n{text[-1500:]}\n\n저장 위치: {ERROR_LOG}", "Convert_Midi 오류", 0x10)
+    except Exception:
+        print(text, file=sys.stderr)
+
+sys.excepthook = report_fatal_error
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+    import customtkinter as ctk
+    # 변환 로직은 Convert_Midi.py 한 곳에서만 관리 (GUI/CLI 결과가 달라지는 문제 방지)
+    from Convert_Midi import INSTRUMENT_CONFIG, extract_selected_instruments, is_generated_file
+except Exception:
+    report_fatal_error(*sys.exc_info())
+    sys.exit(1)
+
 try:
     import windnd
     HAS_WINDND = True
 except ImportError:
     HAS_WINDND = False
-
-# 변환 로직은 Convert_Midi.py 한 곳에서만 관리 (GUI/CLI 결과가 달라지는 문제 방지)
-from Convert_Midi import INSTRUMENT_CONFIG, extract_selected_instruments, is_generated_file
 
 class MidiConverterGUI(ctk.CTk):
     def __init__(self):
@@ -31,6 +64,10 @@ class MidiConverterGUI(ctk.CTk):
 
         self.setup_ui()
         self.setup_dnd()
+
+    def report_callback_exception(self, exc_type, exc, tb):
+        # 버튼 클릭/드래그 처리 중 오류도 로그에 남김 (프로그램은 계속 실행)
+        report_fatal_error(exc_type, exc, tb)
 
     def setup_ui(self):
         # 상단 헤더
@@ -475,6 +512,12 @@ class MidiConverterGUI(ctk.CTk):
         self.log_box.see("end")
 
 def main():
+    try:
+        _main()
+    except Exception:
+        report_fatal_error(*sys.exc_info())
+
+def _main():
     if len(sys.argv) > 1:
         args = sys.argv[1:]
         midi_files = [f for f in args if f.lower().endswith(('.mid', '.midi'))]
