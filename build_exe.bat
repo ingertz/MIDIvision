@@ -10,10 +10,10 @@ if errorlevel 1 (
   goto fail
 )
 echo [1/2] Installing packages...
-%PY% -m pip install --upgrade mido customtkinter windnd pyinstaller
+%PY% -m pip install --upgrade mido customtkinter tkinterdnd2 pyinstaller
 if errorlevel 1 goto fail
 echo [2/2] Building exe...
-%PY% -m PyInstaller --noconfirm --onefile --windowed --collect-all customtkinter --name Convert_Midi Convert_Midi_GUI.py
+%PY% -m PyInstaller --noconfirm --onefile --windowed --collect-all customtkinter --collect-all tkinterdnd2 --name Convert_Midi Convert_Midi_GUI.py
 if errorlevel 1 goto fail
 echo.
 echo Done: dist\Convert_Midi.exe

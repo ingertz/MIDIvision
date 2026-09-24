@@ -1,5 +1,6 @@
 import os
 import sys
+import queue
 import threading
 import traceback
 import subprocess
@@ -41,15 +42,31 @@ except Exception:
     report_fatal_error(*sys.exc_info())
     sys.exit(1)
 
+# 드래그 앤 드롭: tkinterdnd2 (Tk 공식 확장 tkdnd 사용)
+# ※ 예전에 쓰던 windnd는 윈도우 메시지 처리기를 가로채는 방식이라
+#   Python 3.12 이상에서 "Fatal Python error: PyEval_RestoreThread"로 프로그램이 통째로 꺼짐
 try:
-    import windnd
-    HAS_WINDND = True
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+    _GUI_BASES = (ctk.CTk, TkinterDnD.DnDWrapper)
 except ImportError:
-    HAS_WINDND = False
+    HAS_DND = False
+    _GUI_BASES = (ctk.CTk,)
 
-class MidiConverterGUI(ctk.CTk):
+class MidiConverterGUI(*_GUI_BASES):
     def __init__(self):
         super().__init__()
+        self.dnd_ready = False
+        if HAS_DND:
+            try:
+                self.TkdndVersion = TkinterDnD._require(self)
+                self.dnd_ready = True
+            except Exception:
+                pass
+
+        # 작업 스레드 -> 메인 스레드 전달용 (Tk 위젯은 메인 스레드에서만 건드려야 안전)
+        self.ui_queue = queue.Queue()
+        self.after(50, self._drain_ui_queue)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -338,19 +355,29 @@ class MidiConverterGUI(ctk.CTk):
             v.set(False)
 
     def setup_dnd(self):
-        if HAS_WINDND:
-            try:
-                # force_unicode=True: 한글 등 비 ASCII 경로가 깨지지 않도록 str로 받음
-                # 콜백은 윈도우 메시지 처리 중에 호출되므로 after()로 넘겨 Tk 이벤트 루프에서 처리
-                drop_cb = lambda files: self.after(0, self.on_drop, list(files))
-                try:
-                    windnd.hook_dropfiles(self, func=drop_cb, force_unicode=True)
-                except TypeError:  # force_unicode 미지원 구버전 windnd
-                    windnd.hook_dropfiles(self, func=drop_cb)
-            except Exception as e:
-                self.log(f"⚠️ 드래그 앤 드롭 후킹 알림: {e}\n")
+        if self.dnd_ready:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind('<<Drop>>', self._on_dnd_drop)
         else:
-            self.log("⚠️ windnd 모듈 미탑재로 파일 선택 버튼을 사용해 주세요.\n")
+            self.log("⚠️ tkinterdnd2 모듈이 없어 드래그 앤 드롭을 쓸 수 없습니다. 파일 선택 버튼을 사용해 주세요.\n")
+
+    def _on_dnd_drop(self, event):
+        # 공백/한글이 들어간 경로는 {C:/내 폴더/곡.mid} 형태로 오므로 splitlist로 분리
+        self.on_drop(list(self.tk.splitlist(event.data)))
+        return event.action
+
+    def call_in_main(self, func, *args):
+        """작업 스레드에서 화면을 바꿔야 할 때 사용 (메인 스레드가 큐를 꺼내서 실행)"""
+        self.ui_queue.put((func, args))
+
+    def _drain_ui_queue(self):
+        try:
+            while True:
+                func, args = self.ui_queue.get_nowait()
+                func(*args)
+        except queue.Empty:
+            pass
+        self.after(50, self._drain_ui_queue)
 
     def get_selected_keys(self):
         return [k for k, v in self.inst_vars.items() if v.get()]
@@ -445,7 +472,7 @@ class MidiConverterGUI(ctk.CTk):
         except Exception as e:
             self.log(f"❌ 예기치 못한 오류: {e}\n")
         finally:
-            self.after(0, self.on_conversion_finished)
+            self.call_in_main(self.on_conversion_finished)
 
     def _process_files(self, file_list, selected_keys, force_ch0):
         names = [INSTRUMENT_CONFIG[k]['name'] for k in selected_keys]
@@ -506,7 +533,7 @@ class MidiConverterGUI(ctk.CTk):
     def log(self, text):
         # 작업 스레드에서 호출되어도 안전하도록 메인 스레드에서 위젯 갱신
         if threading.current_thread() is not threading.main_thread():
-            self.after(0, self.log, text)
+            self.call_in_main(self.log, text)
             return
         self.log_box.insert("end", text)
         self.log_box.see("end")
