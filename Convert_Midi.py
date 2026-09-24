@@ -66,13 +66,21 @@ DRUM_MAP = {
 # 드럼 음표로 인정하는 범위 (GM/GS 타악기 27~87). 범위 밖 음표는 드럼 소리가 아니므로 버림
 DRUM_NOTE_RANGE = range(27, 88)
 
+# 쉐이커 계열 보조 타악기는 드럼 세트가 아니므로 버림
+# (예: Melt는 마라카스(70)가 1,891번 나와서 H/S키를 계속 연타하게 됨)
+SKIP_DRUM_NOTES = {
+    69,  # Cabasa
+    70,  # Maracas
+    82,  # Shaker
+}
+
 def get_mapped_drum_note(note):
     """
     GM 드럼 음표 -> 인게임 키. 타악기 범위(27~87) 밖의 음표는 None을 반환하여 버립니다.
     (예전에는 범위 밖 음표를 전부 크래시(R)로 바꿔서, 드럼이 아닌 음표가 섞이면
      크래시가 계속 울리는 문제가 있었음)
     """
-    if note not in DRUM_NOTE_RANGE:
+    if note not in DRUM_NOTE_RANGE or note in SKIP_DRUM_NOTES:
         return None
     return DRUM_MAP[note]
 
