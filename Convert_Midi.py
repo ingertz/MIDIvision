@@ -59,24 +59,22 @@ DRUM_MAP = {
     67: 62, 68: 72, 69: 69, 
     70: 62,  # 70번 Maracas / Shaker -> D4 (인게임 S키 = 62, Closed Hi-Hat) ★ 플로어탐(H)이 아닌 하이햇으로 매핑!
     71: 77, 72: 72, 73: 72, 74: 79, 75: 81, 76: 81, 77: 72, 78: 72,
-    79: 72, 80: 72, 81: 72, 82: 77, 83: 77
+    79: 72, 80: 72, 81: 72, 82: 77, 83: 77,
+    84: 77, 85: 72, 86: 69, 87: 69,  # GS 확장: Belltree / Castanets / Surdo
 }
 
+# 드럼 음표로 인정하는 범위 (GM/GS 타악기 27~87). 범위 밖 음표는 드럼 소리가 아니므로 버림
+DRUM_NOTE_RANGE = range(27, 88)
+
 def get_mapped_drum_note(note):
-    """드럼 노트 변환 시 미등록 음표가 70(0번키) 등으로 빠져나가지 않도록 완벽 보정"""
-    if note in DRUM_MAP:
-        return DRUM_MAP[note]
-    # 안전 폴백: 범위를 벗어난 알 수 없는 드럼 음표 보정
-    if note in (35, 36): return 65       # Kick (F)
-    if note in (37, 38, 39, 40): return 72  # Snare (Q)
-    if note in (42, 44): return 62       # Closed Hi-Hat (S)
-    if note in (46, 74): return 79       # Open Hi-Hat (T)
-    if 41 <= note <= 43: return 69       # Floor Tom (H)
-    if 45 <= note <= 48: return 74       # Mid Tom (W)
-    if note in (50, 58): return 76       # High Tom (E)
-    if note in (51, 53, 59): return 81   # Ride (Y)
-    if note < 35: return 72              # 27~34 스틱/효과음 -> Q키 (스네어)
-    return 77 # R (Crash)
+    """
+    GM 드럼 음표 -> 인게임 키. 타악기 범위(27~87) 밖의 음표는 None을 반환하여 버립니다.
+    (예전에는 범위 밖 음표를 전부 크래시(R)로 바꿔서, 드럼이 아닌 음표가 섞이면
+     크래시가 계속 울리는 문제가 있었음)
+    """
+    if note not in DRUM_NOTE_RANGE:
+        return None
+    return DRUM_MAP[note]
 
 # 악기별 판별 설정 (기타, 베이스, 건반, 드럼)
 INSTRUMENT_CONFIG = {
@@ -84,7 +82,7 @@ INSTRUMENT_CONFIG = {
         'name': '드럼',
         'suffix': ' (Drum)',
         'remap_drums': True,  # 드럼은 스타 레조넌스 음계 이동(매핑) 유지!
-        'keywords': ['drum', 'drums', 'perc', 'percussion', '드럼', '타악기', 'battery', 'kit', 'cymb'],
+        'keywords': ['drum', 'drums', 'perc', 'percussion', '드럼', '타악기', 'battery', 'kit', 'cymb', 'ドラム', 'パーカッション', '打楽器'],
         'channel_match': lambda ch: ch == 9,
         'program_match': lambda p: False,
     },
@@ -92,7 +90,7 @@ INSTRUMENT_CONFIG = {
         'name': '기타',
         'suffix': ' (Guitar)',
         'remap_drums': False,  # 멜로디 악기는 원음 유지
-        'keywords': ['guitar', 'gt', 'guit', 'eg', 'ag', 'clean', 'dist', 'overdrive', 'lead gt', 'ac gt', 'el gt', '기타'],
+        'keywords': ['guitar', 'gt', 'guit', 'eg', 'ag', 'clean', 'dist', 'overdrive', 'lead gt', 'ac gt', 'el gt', '기타', 'ギター'],
         'channel_match': lambda ch: ch != 9,
         'program_match': lambda p: 24 <= p <= 31,
     },
@@ -100,7 +98,7 @@ INSTRUMENT_CONFIG = {
         'name': '베이스',
         'suffix': ' (Bass)',
         'remap_drums': False,  # 멜로디 악기는 원음 유지
-        'keywords': ['bass', 'eb', 'slap', 'pick bass', 'fingered bass', 'ac bass', 'el bass', '베이스'],
+        'keywords': ['bass', 'eb', 'slap', 'pick bass', 'fingered bass', 'ac bass', 'el bass', '베이스', 'ベース'],
         'channel_match': lambda ch: ch != 9,
         'program_match': lambda p: 32 <= p <= 39,
     },
@@ -108,7 +106,7 @@ INSTRUMENT_CONFIG = {
         'name': '건반',
         'suffix': ' (Keyboard)',
         'remap_drums': False,  # 멜로디 악기는 원음 유지
-        'keywords': ['piano', 'key', 'keyboard', 'synth', 'organ', 'clav', 'rhodes', 'harpsichord', '피아노', '건반', '신스'],
+        'keywords': ['piano', 'key', 'keyboard', 'synth', 'organ', 'clav', 'rhodes', 'harpsichord', '피아노', '건반', '신스', 'ピアノ', 'オルガン', 'シンセ', 'キーボード'],
         'channel_match': lambda ch: ch != 9,
         'program_match': lambda p: (0 <= p <= 23) or (80 <= p <= 103),
     }
@@ -149,10 +147,30 @@ def classify_program(program):
         return 'guitar'
     return 'keyboard'
 
-def analyze_track_instrument(track):
+def decode_text(text):
+    """
+    mido는 트랙 이름을 latin-1로 읽기 때문에 일본어(Shift-JIS)/한국어(CP949) 이름이 깨집니다.
+    원래 바이트로 되돌린 뒤 UTF-8 -> Shift-JIS -> CP949 순서로 다시 디코딩합니다.
+    """
+    try:
+        raw = text.encode('latin-1')
+    except UnicodeEncodeError:
+        return text
+    for enc in ('utf-8', 'cp932', 'cp949'):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    return text
+
+def file_has_drum_channel(mid):
+    """파일 어딘가에 채널 10(인덱스 9) 음표가 있는지"""
+    return any(msg.type == 'note_on' and msg.channel == 9 for track in mid.tracks for msg in track)
+
+def analyze_track_instrument(track, drum_by_name=True):
     """
     트랙의 이름, 프로그램 번호, 채널, 음표 정보를 기반으로 악기 판별:
-    - 드럼: 채널 9 또는 드럼 키워드
+    - 드럼: 채널 9 또는 드럼 키워드 (drum_by_name=False이면 채널 9만 인정)
     - 베이스: 베이스 프로그램(32~39) 또는 베이스 키워드
     - 기타: 기타 프로그램(24~31) 또는 기타 키워드
     - 건반: 위 3개를 제외한 모든 악기(피아노, 색소폰, 브라스, 스트링, 플루트, 보컬 멜로디 등)를 건반으로 배정!
@@ -165,7 +183,7 @@ def analyze_track_instrument(track):
 
     for msg in track:
         if msg.type == 'track_name':
-            name = msg.name
+            name = decode_text(msg.name)
         elif msg.type in CONDUCTOR_META_TYPES:
             has_tempo = True
         elif msg.type == 'program_change':
@@ -187,7 +205,7 @@ def analyze_track_instrument(track):
     if total_notes == 0:
         info['instrument'] = 'tempo' if has_tempo else 'empty'
     # 1. 드럼 판별 (Channel 9 또는 드럼 키워드)
-    elif (9 in channels) or match_keyword(name, INSTRUMENT_CONFIG['drum']['keywords']):
+    elif (9 in channels) or (drum_by_name and match_keyword(name, INSTRUMENT_CONFIG['drum']['keywords'])):
         info['instrument'] = 'drum'
     # 2. 베이스 판별 (베이스 키워드 또는 베이스 프로그램 32~39)
     elif match_keyword(name, INSTRUMENT_CONFIG['bass']['keywords']) or any(32 <= p <= 39 for p in programs):
@@ -241,6 +259,8 @@ class DrumNoteMapper:
     def process(self, msg, abs_tick):
         """변환된 메시지 목록을 반환 (없으면 빈 목록)"""
         key = get_mapped_drum_note(msg.note)
+        if key is None:
+            return []  # 타악기 범위 밖 음표는 버림
         if is_note_on(msg):
             if self.last_on_tick.get(key) == abs_tick:
                 return []  # 같은 순간 중복 타격 제거
@@ -269,9 +289,12 @@ def extract_single_instrument(mid, inst_key, force_ch0=True):
 
     total_notes_extracted = 0
     total_mapped = 0
+    # 채널 10 드럼이 있는 파일이면 트랙 이름만으로 드럼 판정하지 않음
+    # (이름 때문에 멜로디 트랙이 드럼 파일에 섞여 들어가는 것 방지)
+    drum_by_name = not file_has_drum_channel(mid)
 
     for track in mid.tracks:
-        info = analyze_track_instrument(track)
+        info = analyze_track_instrument(track, drum_by_name)
         if info['total_notes'] == 0:
             continue
 
@@ -328,13 +351,15 @@ def extract_single_instrument(mid, inst_key, force_ch0=True):
 
             out_msgs = [msg]
             if msg.type in ('note_on', 'note_off'):
+                if mapper is not None:
+                    out_msgs = mapper.process(msg, abs_tick)
+                    if is_note_on(msg) and get_mapped_drum_note(msg.note) is None:
+                        continue  # 버려진 음표는 개수에 포함하지 않음
+                    if is_note_on(msg):
+                        total_mapped += 1
                 if is_note_on(msg):
                     total_notes_extracted += 1
                     has_valid_note = True
-                if mapper is not None:
-                    out_msgs = mapper.process(msg, abs_tick)
-                    if is_note_on(msg):
-                        total_mapped += 1
 
             for out in out_msgs:
                 if force_ch0:
@@ -403,8 +428,24 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True):
 
     return results
 
+def print_analysis(input_path):
+    """트랙별 판별 결과 출력 (어떤 트랙이 어떤 악기로 분류되는지 확인용)"""
+    mid = MidiFile(input_path)
+    drum_by_name = not file_has_drum_channel(mid)
+    print(f"파일: {os.path.basename(input_path)} (Type {mid.type}, {len(mid.tracks)}개 트랙, TPB {mid.ticks_per_beat})")
+    for idx, track in enumerate(mid.tracks):
+        info = analyze_track_instrument(track, drum_by_name)
+        notes = [m.note for m in track if is_note_on(m)]
+        note_range = f"{min(notes)}~{max(notes)}" if notes else "-"
+        print(f"  [{idx}] {info['name'] or '(이름 없음)'!r}: {info['instrument']} | "
+              f"음표 {info['total_notes']}개 (범위 {note_range}) | "
+              f"채널 {sorted(info['channels'])} | 프로그램 {sorted(info['programs'])}")
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 2 and sys.argv[1] == '--analyze':
+        for arg in sys.argv[2:]:
+            print_analysis(arg)
+    elif len(sys.argv) > 1:
         print("="*65)
         print("🎸 밴드스코어 악기 선택 추출기 (기타 / 베이스 / 건반 / 드럼)")
         print("   * 드럼: 스타 레조넌스 음계 이동 적용")
