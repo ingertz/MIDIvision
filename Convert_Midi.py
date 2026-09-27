@@ -418,20 +418,20 @@ SIMPLIFY_DROP = 99  # 이 우선순위는 아예 버림
 def simplify_tier(inst_key, program, is_melody):
     """
     간소화 시 음표 우선순위 (숫자가 작을수록 중요)
-    0: 멜로디(보컬 라인)  1: 피아노/건반  2: 신스·브라스·리드 등  3: 현악·코러스
+    0: 멜로디(보컬 라인)  1: 멜로디가 쉬는 마디의 리드(솔로)  2: 피아노/건반  3: 신스·브라스·리드 등  4: 현악·코러스
     SIMPLIFY_DROP: 패드/효과음/민속악기/SFX (GM 88~127) -> 버림
     """
     if is_melody:
         return 0
     if inst_key != 'keyboard' or program is None:
-        return 1
+        return 2
     if program >= 88:
         return SIMPLIFY_DROP
     if program <= 23:
-        return 1
+        return 2
     if 40 <= program <= 55:
-        return 3
-    return 2
+        return 4
+    return 3
 
 def detect_melody_sources(mid, drum_by_name):
     """
@@ -484,10 +484,78 @@ def detect_melody_sources(mid, drum_by_name):
         return {(idx, ch)}
     return set()
 
-def reduce_polyphony(events, max_notes, low_first=False):
+# 멜로디가 길게 끄는 음을 끊고 들어갈 수 있는 솔로의 최소 음표 수 (마디당)
+SOLO_MIN_NOTES_PER_BAR = 8
+
+def assign_bar_leads(events, ticks_per_bar, tolerance):
+    """
+    메인 멜로디가 쉬는 마디(간주, 솔로, 인트로)에서는 그 마디의 리드 라인을 멜로디로 승격합니다.
+    - 마디 안에서 음표가 충분히 많은 트랙 중 음이 가장 높은 트랙 = 리드
+    - 리드와 거의 같은 타이밍에 같은 라인을 치는 트랙(더블링/에코)도 함께 리드
+    예: Pretender 81~88마디 솔로는 Square Lead(ch6)와 Saw Lead(ch11)가 10틱 차이로 같은 라인을 침
+    """
+    ons = [e for e in events if e[2] == 'on' and e[6] < SIMPLIFY_DROP]
+    by_bar = {}
+    for e in ons:
+        if e[6] != 0:
+            by_bar.setdefault(e[0] // ticks_per_bar, {}).setdefault(e[3][:2], []).append((e[0], e[4]))
+
+    # 마디별로 메인 멜로디가 실제로 울리는 시간 비율
+    melody_on = {}
+    melody_cover = {}
+    melody_tail_bars = set()  # 앞 마디의 멜로디 꼬리음이 걸쳐 있는 마디
+    for e in sorted(events, key=lambda e: (e[0], e[1])):
+        if e[6] == 0 and e[2] == 'on':
+            melody_on[e[3]] = e[0]
+        elif e[2] == 'off' and e[3] in melody_on:
+            start, end = melody_on.pop(e[3]), e[0]
+            for bar in range(start // ticks_per_bar + 1, (end - 1) // ticks_per_bar + 1):
+                melody_tail_bars.add(bar)
+            # 앞 마디에서 이어져 길게 끄는 꼬리음은 '노래 중'으로 치지 않음 (시작한 마디만 계산)
+            end = min(end, (start // ticks_per_bar + 1) * ticks_per_bar)
+            while start < end:
+                bar = start // ticks_per_bar
+                seg_end = min(end, (bar + 1) * ticks_per_bar)
+                melody_cover[bar] = melody_cover.get(bar, 0) + seg_end - start
+                start = seg_end
+
+    leads = {}
+    for bar, sources in by_bar.items():
+        if melody_cover.get(bar, 0) >= ticks_per_bar * 0.25:
+            continue  # 메인 멜로디가 노래하는 마디
+        most = max(len(v) for v in sources.values())
+        cands = []
+        for src, notes in sources.items():
+            if len(notes) >= max(2, most * 0.25):
+                pitches = sorted(n for _, n in notes)
+                cands.append((pitches[len(pitches) // 2], len(notes), src))
+        if not cands:
+            continue
+        best_median, best_count, best = max(cands)
+        if bar in melody_tail_bars and best_count < SOLO_MIN_NOTES_PER_BAR:
+            continue  # 멜로디가 길게 끄는 중에는 촘촘한 솔로만 끼어들 수 있음
+        best_ticks = [t for t, _ in sources[best]]
+        chosen = {best}
+        for median, _, src in cands:
+            if src == best or abs(median - best_median) > 12:
+                continue
+            notes = sources[src]
+            matched = sum(1 for t, _ in notes if any(abs(t - bt) <= tolerance for bt in best_ticks))
+            if matched >= 0.8 * len(notes):
+                chosen.add(src)  # 같은 라인을 겹쳐 치는 트랙
+        leads[bar] = chosen
+
+    promoted = []
+    for e in events:
+        if e[2] == 'on' and e[6] < SIMPLIFY_DROP and e[3][:2] in leads.get(e[0] // ticks_per_bar, ()):
+            e = e[:6] + (1,)
+        promoted.append(e)
+    return promoted
+
+def reduce_polyphony(events, max_notes, low_first=False, dup_window=0, ticks_per_bar=None):
     """
     events: [(틱, 순서, 'on'/'off', 원본키, 음, 세기, 우선순위)]
-    - 같은 순간 같은 음은 한 번만
+    - 같은 순간(dup_window 틱 이내) 같은 음은 한 번만 (여러 트랙 더블링/에코 합치기)
     - 동시에 max_notes개까지만 (우선순위 높은 음 우선, 같은 우선순위면 맨 위/맨 아래 음 우선)
     - 자리가 없으면 더 낮은 우선순위(또는 먼저 눌려 있던 같은 우선순위) 음을 떼고 새 음을 누름
     - 멜로디(우선순위 0)가 울리는 동안 반주는 멜로디보다 높은 음을 치지 않음 (멜로디가 항상 맨 위)
@@ -530,6 +598,13 @@ def reduce_polyphony(events, max_notes, low_first=False):
             if tier >= SIMPLIFY_DROP:
                 dropped += 1
                 continue
+            if tier == 1 and ticks_per_bar:
+                # 솔로가 시작되면 앞 마디에서 이어져 울리는 멜로디 꼬리음은 뗌
+                bar_start = tick - tick % ticks_per_bar
+                for p in [p for p, (_, t, since) in active.items() if t == 0 and since < bar_start and p < pitch]:
+                    accepted.pop(active[p][0], None)
+                    del active[p]
+                    out.append((tick, Message('note_off', note=p, velocity=0)))
             melody_pitches = [p for p, (_, t, _) in active.items() if t == 0]
             if tier != 0 and melody_pitches and pitch > min(melody_pitches):
                 dropped += 1  # 멜로디보다 높은 반주음
@@ -544,7 +619,7 @@ def reduce_polyphony(events, max_notes, low_first=False):
                 if active[pitch][1] == 0 and tier != 0:
                     dropped += 1  # 멜로디가 누르고 있는 음을 반주가 빼앗지 않음
                     continue
-                if active[pitch][2] == tick:
+                if tick - active[pitch][2] <= dup_window:
                     dropped += 1  # 같은 순간 같은 음 중복
                     continue
                 accepted.pop(active[pitch][0], None)
@@ -682,7 +757,12 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
             new_mid.tracks.append(new_track)
 
     if simplify and collected:
-        reduced, _ = reduce_polyphony(collected, SIMPLIFY_MAX_NOTES[inst_key], low_first=(inst_key == 'bass'))
+        dup_window = max(1, mid.ticks_per_beat // 24)
+        if inst_key == 'keyboard':
+            collected = assign_bar_leads(collected, mid.ticks_per_beat * 4, dup_window)
+        reduced, _ = reduce_polyphony(collected, SIMPLIFY_MAX_NOTES[inst_key],
+                                      low_first=(inst_key == 'bass'), dup_window=dup_window,
+                                      ticks_per_bar=mid.ticks_per_beat * 4)
         total_notes_extracted = sum(1 for _, m in reduced if m.type == 'note_on')
         if total_notes_extracted:
             track = MidiTrack([MetaMessage('track_name', name=cfg['suffix'].strip(' ()'))])
