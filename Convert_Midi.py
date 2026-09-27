@@ -414,6 +414,11 @@ def align_to_song_timeline(new_mid, part_indices, timeline):
 # 파트별 동시에 누르는 최대 음 수 (None = 제한 없음)
 SIMPLIFY_MAX_NOTES = {'drum': None, 'guitar': 3, 'bass': 1, 'keyboard': 3}
 SIMPLIFY_DROP = 99  # 이 우선순위는 아예 버림
+# 트레몰로(아주 빠른 연타) 줄이기: 이 박자보다 촘촘한 타격이 TREMOLO_MIN_HITS번 이상 이어지면
+# 그 구간만 TREMOLO_KEEP_BEATS 간격(0.25 = 16분음표)으로 솎아냄. 보통 속주(16·32분음표)는 그대로.
+TREMOLO_MAX_GAP_BEATS = 1 / 12
+TREMOLO_MIN_HITS = 4
+TREMOLO_KEEP_BEATS = 0.25
 
 def simplify_tier(inst_key, program, is_melody):
     """
@@ -551,6 +556,47 @@ def assign_bar_leads(events, ticks_per_bar, tolerance):
             e = e[:6] + (1,)
         promoted.append(e)
     return promoted
+
+def thin_tremolos(events, ticks_per_beat, dup_window):
+    """
+    예: Pretender 솔로의 3:41, 3:44, 3:51 부근은 1/16박 간격(64분음표)으로 같은 음을 수십 번 연타함
+    -> 그 구간만 16분음표 간격으로 줄임
+    """
+    max_gap = max(dup_window + 1, int(ticks_per_beat * TREMOLO_MAX_GAP_BEATS))
+    keep_gap = int(ticks_per_beat * TREMOLO_KEEP_BEATS)
+    ticks = sorted({e[0] for e in events if e[2] == 'on' and e[6] < SIMPLIFY_DROP})
+    # 더블링/에코(dup_window 이내)는 한 번의 타격으로 봄
+    hits = []
+    for t in ticks:
+        if not hits or t - hits[-1] > dup_window:
+            hits.append(t)
+
+    drop_hits = set()
+    run = [hits[0]] if hits else []
+    for t in hits[1:] + [None]:
+        if t is not None and t - run[-1] <= max_gap:
+            run.append(t)
+            continue
+        if len(run) >= TREMOLO_MIN_HITS:
+            last_kept = None
+            for h in run:
+                if last_kept is not None and h - last_kept < keep_gap:
+                    drop_hits.add(h)
+                else:
+                    last_kept = h
+        if t is not None:
+            run = [t]
+    if not drop_hits:
+        return events
+
+    dropped_ticks = sorted(drop_hits)
+    import bisect
+
+    def is_dropped(tick):
+        i = bisect.bisect_left(dropped_ticks, tick - dup_window)
+        return i < len(dropped_ticks) and dropped_ticks[i] <= tick
+
+    return [e[:6] + (SIMPLIFY_DROP,) if e[2] == 'on' and is_dropped(e[0]) else e for e in events]
 
 def reduce_polyphony(events, max_notes, low_first=False, dup_window=0, ticks_per_bar=None):
     """
@@ -760,6 +806,7 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
         dup_window = max(1, mid.ticks_per_beat // 24)
         if inst_key == 'keyboard':
             collected = assign_bar_leads(collected, mid.ticks_per_beat * 4, dup_window)
+        collected = thin_tremolos(collected, mid.ticks_per_beat, dup_window)
         reduced, _ = reduce_polyphony(collected, SIMPLIFY_MAX_NOTES[inst_key],
                                       low_first=(inst_key == 'bass'), dup_window=dup_window,
                                       ticks_per_bar=mid.ticks_per_beat * 4)
