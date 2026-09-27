@@ -1,5 +1,6 @@
 import mido
 from mido import MidiFile, MidiTrack, Message, MetaMessage
+import io
 import sys
 import os
 import re
@@ -489,6 +490,96 @@ def is_generated_file(path):
     base = os.path.splitext(os.path.basename(path))[0]
     return strip_known_suffixes(base) != base
 
+def repair_smf_bytes(data):
+    """
+    규격 위반 MIDI 바이트 복구 (파일 길이/구조는 그대로 두고 값만 교정).
+
+    예: Rally go round 의 바이올린 트랙은 피치벤드가 최저값 아래로 내려가면서
+        음수 값(f8 ff 등)이 그대로 기록되어 있음.
+        - mido는 'data byte must be in range 0..127' 오류로 파일을 거부하고
+        - clip=True로 읽어도 f8을 '타이밍 클럭' 메시지로 오인해서 뒤쪽 트랙 전체가 밀려
+          곡 길이가 20분으로 늘어나는 등 망가짐.
+    러닝 스테이터스 중에 0x80 이상 바이트가 연달아 나오면 상태 바이트가 아닌 깨진 데이터로 간주하고,
+    범위를 넘은 데이터는 피치벤드면 최저값(0), 그 외는 127로 교정합니다.
+    반환: (복구된 바이트, 교정한 개수)
+    """
+    buf = bytearray(data)
+    fixed = 0
+    pos = 14 if buf[:4] == b'MThd' else 0
+    if buf[:4] == b'MThd':
+        pos = 8 + int.from_bytes(buf[4:8], 'big')
+
+    def read_vlq(i, end):
+        value = 0
+        while i < end:
+            b = buf[i]
+            i += 1
+            value = (value << 7) | (b & 0x7F)
+            if b < 0x80:
+                break
+        return value, i
+
+    while pos + 8 <= len(buf):
+        length = int.from_bytes(buf[pos + 4:pos + 8], 'big')
+        start, end = pos + 8, min(pos + 8 + length, len(buf))
+        if buf[pos:pos + 4] == b'MTrk':
+            i = start
+            status = None
+            while i < end:
+                _, i = read_vlq(i, end)  # delta time
+                if i >= end:
+                    break
+                b = buf[i]
+                # 정상 파일에서는 상태 바이트 바로 뒤에 0x80 이상이 올 수 없음(메타 타입/데이터는 0~127).
+                # 러닝 스테이터스 중에 0x80 이상이 두 개 연속이면 음수로 기록된 깨진 데이터로 판단
+                # (예: f8 ff, e7 fd, d6 fb = 16비트 음수 피치벤드)
+                is_running = b < 0x80 or (
+                    status is not None and b not in (0xF0, 0xF7)
+                    and i + 1 < end and buf[i + 1] > 0x7F
+                )
+                if not is_running:
+                    i += 1
+                    if b == 0xFF:  # 메타 메시지
+                        i += 1
+                        size, i = read_vlq(i, end)
+                        i += size
+                        continue
+                    if b in (0xF0, 0xF7):  # sysex
+                        size, i = read_vlq(i, end)
+                        i += size
+                        continue
+                    if b >= 0xF0:
+                        continue
+                    status = b
+                n_data = 1 if (status & 0xF0) in (0xC0, 0xD0) else 2
+                data_bytes = buf[i:i + n_data]
+                if any(x > 0x7F for x in data_bytes):
+                    fixed += 1
+                    if (status & 0xF0) == 0xE0 and n_data == 2:
+                        buf[i] = 0x00      # 음수로 넘어간 피치벤드 -> 최저값
+                        buf[i + 1] = 0x00
+                    else:
+                        for k in range(n_data):
+                            if i + k < end and buf[i + k] > 0x7F:
+                                buf[i + k] = 0x7F
+                i += n_data
+        pos = start + length
+    return bytes(buf), fixed
+
+def load_midi(input_path):
+    """
+    MIDI 파일 읽기. 규격 위반(데이터 바이트 > 127) 파일은 자동 복구 후 읽습니다.
+    반환: (MidiFile, 복구 여부)
+    """
+    try:
+        return MidiFile(input_path), False
+    except (OSError, ValueError) as e:
+        if 'data byte' not in str(e):
+            raise
+    with open(input_path, 'rb') as f:
+        data, _ = repair_smf_bytes(f.read())
+    return MidiFile(file=io.BytesIO(data)), True
+
 def extract_selected_instruments(input_path, selected_keys, force_ch0=True):
     """
     밴드스코어에서 사용자가 선택한 악기 목록(drum, guitar, bass, keyboard)을 각각 추출하여 저장합니다.
@@ -496,7 +587,9 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True):
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"파일을 찾을 수 없습니다: {input_path}")
 
-    mid = MidiFile(input_path)
+    mid, repaired = load_midi(input_path)
+    if repaired:
+        print(f"⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다: {os.path.basename(input_path)}")
     dir_name, file_name = os.path.split(input_path)
     base_name, ext = os.path.splitext(file_name)
     out_base = strip_known_suffixes(base_name)
@@ -532,7 +625,9 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True):
 
 def print_analysis(input_path):
     """트랙별 판별 결과 출력 (어떤 트랙이 어떤 악기로 분류되는지 확인용)"""
-    mid = MidiFile(input_path)
+    mid, repaired = load_midi(input_path)
+    if repaired:
+        print("⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다.")
     drum_by_name = not file_has_drum_channel(mid)
     print(f"파일: {os.path.basename(input_path)} (Type {mid.type}, {len(mid.tracks)}개 트랙, TPB {mid.ticks_per_beat})")
     for idx, track in enumerate(mid.tracks):
