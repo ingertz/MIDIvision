@@ -84,6 +84,10 @@ def get_mapped_drum_note(note):
         return None
     return DRUM_MAP[note]
 
+# 보컬(멜로디) 트랙 이름 키워드: 악기 번호가 기타/베이스여도 무조건 건반으로 보냄
+VOCAL_KEYWORDS = ['vocal', 'vocals', 'vo', 'vox', 'voice', 'melody', 'singer', 'lead vocal', 'chorus',
+                  '보컬', '노래', '멜로디', '코러스', 'ボーカル', '歌', 'メロディ', 'コーラス', '人声', '主唱', '旋律', '和声']
+
 # 악기별 판별 설정 (기타, 베이스, 건반, 드럼)
 INSTRUMENT_CONFIG = {
     'drum': {
@@ -181,7 +185,8 @@ def analyze_track_instrument(track, drum_by_name=True):
     - 드럼: 채널 9 또는 드럼 키워드 (drum_by_name=False이면 채널 9만 인정)
     - 베이스: 베이스 프로그램(32~39) 또는 베이스 키워드
     - 기타: 기타 프로그램(24~31) 또는 기타 키워드
-    - 건반: 위 3개를 제외한 모든 악기(피아노, 색소폰, 브라스, 스트링, 플루트, 보컬 멜로디 등)를 건반으로 배정!
+    - 보컬: 트랙 이름이 보컬이면 악기 번호와 상관없이 건반
+    - 건반: 위를 제외한 모든 악기(피아노, 색소폰, 브라스, 스트링, 플루트, 보컬 멜로디 등)를 건반으로 배정!
     """
     name = ""
     channels = set()
@@ -215,13 +220,16 @@ def analyze_track_instrument(track, drum_by_name=True):
     # 1. 드럼 판별 (Channel 9 또는 드럼 키워드)
     elif (9 in channels) or (drum_by_name and match_keyword(name, INSTRUMENT_CONFIG['drum']['keywords'])):
         info['instrument'] = 'drum'
-    # 2. 베이스 판별 (베이스 키워드 또는 베이스 프로그램 32~39)
+    # 2. 보컬 트랙 -> 건반 (보컬 멜로디를 기타/베이스 음색으로 찍어둔 MIDI 대비)
+    elif match_keyword(name, VOCAL_KEYWORDS):
+        info['instrument'] = 'keyboard'
+    # 3. 베이스 판별 (베이스 키워드 또는 베이스 프로그램 32~39)
     elif match_keyword(name, INSTRUMENT_CONFIG['bass']['keywords']) or any(32 <= p <= 39 for p in programs):
         info['instrument'] = 'bass'
-    # 3. 기타 판별 (기타 키워드 또는 기타 프로그램 24~31)
+    # 4. 기타 판별 (기타 키워드 또는 기타 프로그램 24~31)
     elif match_keyword(name, INSTRUMENT_CONFIG['guitar']['keywords']) or any(24 <= p <= 31 for p in programs):
         info['instrument'] = 'guitar'
-    # 4. 그 외 모든 악기 -> 건반(Keyboard)으로 배정!
+    # 5. 그 외 모든 악기 -> 건반(Keyboard)으로 배정!
     # (색소폰, 트럼펫, 브라스, 바이올린, 스트링, 플루트, 오보에, 보컬 멜로디, 피아노, 오르간, 신스 등)
     else:
         info['instrument'] = 'keyboard'

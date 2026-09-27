@@ -100,7 +100,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         desc_label = ctk.CTkLabel(
             header_frame, 
-            text="밴드 MIDI에서 원하는 파트를 선택 추출합니다. 드럼(음계 이동), 기타/베이스(원음 보존), 건반(색소폰·관현악 등 포함 원음 보존)",
+            text="밴드 MIDI에서 원하는 파트를 선택 추출합니다. 드럼(음계 이동), 기타/베이스(원음 보존), 건반(보컬·색소폰·관현악 등 포함 원음 보존)",
             font=ctk.CTkFont(family="Malgun Gothic", size=12),
             text_color="#9AA0A6"
         )
@@ -191,7 +191,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         self.chk_keyboard = ctk.CTkCheckBox(
             check_row,
-            text="🎹 건반 (Keyboard)\n   └ 색소폰·관현악 전악기",
+            text="🎹 건반 (Keyboard)\n   └ 보컬·관현악 전악기",
             variable=self.inst_vars['keyboard'],
             font=ctk.CTkFont(family="Malgun Gothic", size=12, weight="bold"),
             text_color="#F8FAFC",
