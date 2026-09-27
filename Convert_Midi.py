@@ -176,15 +176,42 @@ def decode_text(text):
             pass
     return text
 
+# 뱅크 셀렉트(CC0) 값이 이 값이면 야마하 XG 드럼 킷 (채널 10이 아니어도 드럼)
+XG_DRUM_BANKS = (126, 127)
+
+# 베이스 악기 번호라도 중간 음이 이보다 높으면 베이스가 아님 (G3 = 55)
+# 예: Pretender는 채널 7이 Synth Bass 2(39)인데 실제로는 32~89 음역 화음을 치는 신스
+BASS_MAX_MEDIAN_NOTE = 55
+
+def track_drum_channels(track):
+    """드럼 채널 집합: 채널 10(인덱스 9) + XG 드럼 뱅크(127/126)가 선택된 채널"""
+    drum = {9}
+    for msg in track:
+        if msg.type == 'control_change' and msg.control == 0 and msg.value in XG_DRUM_BANKS:
+            drum.add(msg.channel)
+    return drum
+
+def channel_median_notes(track):
+    """채널별 음 높이 중간값"""
+    notes = {}
+    for msg in track:
+        if is_note_on(msg):
+            notes.setdefault(msg.channel, []).append(msg.note)
+    return {ch: sorted(ns)[len(ns) // 2] for ch, ns in notes.items()}
+
 def file_has_drum_channel(mid):
-    """파일 어딘가에 채널 10(인덱스 9) 음표가 있는지"""
-    return any(msg.type == 'note_on' and msg.channel == 9 for track in mid.tracks for msg in track)
+    """파일 어딘가에 드럼 채널(채널 10 또는 XG 드럼 킷) 음표가 있는지"""
+    for track in mid.tracks:
+        drum = track_drum_channels(track)
+        if any(is_note_on(msg) and msg.channel in drum for msg in track):
+            return True
+    return False
 
 def analyze_track_instrument(track, drum_by_name=True):
     """
     트랙의 이름, 프로그램 번호, 채널, 음표 정보를 기반으로 악기 판별:
     - 드럼: 채널 9 또는 드럼 키워드 (drum_by_name=False이면 채널 9만 인정)
-    - 베이스: 베이스 프로그램(32~39) 또는 베이스 키워드
+    - 베이스: 베이스 키워드, 또는 베이스 프로그램(32~39)이면서 중간 음이 G3 이하
     - 기타: 기타 프로그램(24~31) 또는 기타 키워드
     - 보컬: 트랙 이름이 보컬이면 악기 번호와 상관없이 건반
     - 건반: 위를 제외한 모든 악기(피아노, 색소폰, 브라스, 스트링, 플루트, 보컬 멜로디 등)를 건반으로 배정!
@@ -207,25 +234,33 @@ def analyze_track_instrument(track, drum_by_name=True):
                 total_notes += 1
             channels.add(msg.channel)
 
+    drum_channels = track_drum_channels(track)
+    medians = channel_median_notes(track)
+    all_notes = sorted(msg.note for msg in track if is_note_on(msg))
+    median_note = all_notes[len(all_notes) // 2] if all_notes else 0
+
     info = {
         'name': name,
         'total_notes': total_notes,
         'has_tempo': has_tempo,
         'channels': channels,
         'programs': programs,
+        'drum_channels': drum_channels,
+        'channel_medians': medians,
     }
 
     # 음표가 없는 메타/템포 트랙
     if total_notes == 0:
         info['instrument'] = 'tempo' if has_tempo else 'empty'
-    # 1. 드럼 판별 (Channel 9 또는 드럼 키워드)
-    elif (9 in channels) or (drum_by_name and match_keyword(name, INSTRUMENT_CONFIG['drum']['keywords'])):
+    # 1. 드럼 판별 (채널 10 / XG 드럼 킷 또는 드럼 키워드)
+    elif (channels & drum_channels) or (drum_by_name and match_keyword(name, INSTRUMENT_CONFIG['drum']['keywords'])):
         info['instrument'] = 'drum'
     # 2. 보컬 트랙 -> 건반 (보컬 멜로디를 기타/베이스 음색으로 찍어둔 MIDI 대비)
     elif match_keyword(name, VOCAL_KEYWORDS):
         info['instrument'] = 'keyboard'
-    # 3. 베이스 판별 (베이스 키워드 또는 베이스 프로그램 32~39)
-    elif match_keyword(name, INSTRUMENT_CONFIG['bass']['keywords']) or any(32 <= p <= 39 for p in programs):
+    # 3. 베이스 판별 (베이스 키워드, 또는 베이스 프로그램 32~39 이면서 실제로 낮은 음역)
+    elif match_keyword(name, INSTRUMENT_CONFIG['bass']['keywords']) or (
+            any(32 <= p <= 39 for p in programs) and median_note <= BASS_MAX_MEDIAN_NOTE):
         info['instrument'] = 'bass'
     # 4. 기타 판별 (기타 키워드 또는 기타 프로그램 24~31)
     elif match_keyword(name, INSTRUMENT_CONFIG['guitar']['keywords']) or any(24 <= p <= 31 for p in programs):
@@ -404,14 +439,19 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
             continue
 
         channel_program = {}  # 채널별 현재 프로그램 번호
+        drum_chs = info['drum_channels']
+        medians = info['channel_medians']
 
         def channel_matches(ch):
             if not per_channel:
                 return True
-            if ch == 9:
+            if ch in drum_chs:
                 return inst_key == 'drum'
             if ch in channel_program:
-                return classify_program(channel_program[ch]) == inst_key
+                inst = classify_program(channel_program[ch])
+                if inst == 'bass' and medians.get(ch, 0) > BASS_MAX_MEDIAN_NOTE:
+                    inst = 'keyboard'  # 베이스 음색이지만 높은 음역 화음 -> 신스
+                return inst == inst_key
             # 프로그램 정보가 없는 채널은 트랙 판별 결과를 따름
             fallback = track_inst if track_inst != 'drum' else 'keyboard'
             return fallback == inst_key
