@@ -410,7 +410,149 @@ def align_to_song_timeline(new_mid, part_indices, timeline):
     events.append((max(timeline['end'], track_end), MetaMessage('end_of_track')))
     new_mid.tracks[idx] = to_track(events)
 
-def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True):
+# ===== 간소화(화음/트랙 줄이기) 설정 =====
+# 파트별 동시에 누르는 최대 음 수 (None = 제한 없음)
+SIMPLIFY_MAX_NOTES = {'drum': None, 'guitar': 3, 'bass': 1, 'keyboard': 3}
+SIMPLIFY_DROP = 99  # 이 우선순위는 아예 버림
+
+def simplify_tier(inst_key, program, is_melody):
+    """
+    간소화 시 음표 우선순위 (숫자가 작을수록 중요)
+    0: 멜로디(보컬 라인)  1: 피아노/건반  2: 신스·브라스·리드 등  3: 현악·코러스
+    SIMPLIFY_DROP: 패드/효과음/민속악기/SFX (GM 88~127) -> 버림
+    """
+    if is_melody:
+        return 0
+    if inst_key != 'keyboard' or program is None:
+        return 1
+    if program >= 88:
+        return SIMPLIFY_DROP
+    if program <= 23:
+        return 1
+    if 40 <= program <= 55:
+        return 3
+    return 2
+
+def detect_melody_sources(mid, drum_by_name):
+    """
+    건반 파트에서 멜로디(보컬 라인)를 치는 (트랙 번호, 채널) 찾기
+    1순위: 이름이 보컬인 트랙
+    2순위: 한 음씩만 치는(단선율) 고음역 채널 중 음표가 가장 많은 것
+    """
+    vocal = set()
+    candidates = []
+    for idx, track in enumerate(mid.tracks):
+        info = analyze_track_instrument(track, drum_by_name)
+        if info['total_notes'] == 0:
+            continue
+        drum_chs = info['drum_channels']
+        if match_keyword(info['name'], VOCAL_KEYWORDS):
+            vocal |= {(idx, ch) for ch in info['channels'] if ch not in drum_chs}
+            continue
+        first_program = {}
+        active = {}
+        stats = {}
+        for msg in track:
+            if msg.type == 'program_change':
+                first_program.setdefault(msg.channel, msg.program)
+            elif msg.type in ('note_on', 'note_off') and msg.channel not in drum_chs:
+                st = stats.setdefault(msg.channel, {'notes': [], 'poly': 0})
+                held = active.setdefault(msg.channel, set())
+                if is_note_on(msg):
+                    held.add(msg.note)
+                    st['notes'].append(msg.note)
+                    st['poly'] += len(held)
+                else:
+                    held.discard(msg.note)
+        for ch, st in stats.items():
+            prog = first_program.get(ch)
+            if prog is not None and (classify_program(prog) in ('guitar', 'bass') or prog >= 88):
+                continue
+            if prog is None and info['instrument'] in ('guitar', 'bass', 'drum'):
+                continue
+            ns = sorted(st['notes'])
+            if not ns:
+                continue
+            median = ns[len(ns) // 2]
+            avg_poly = st['poly'] / len(ns)
+            if avg_poly <= 1.2 and 55 <= median <= 90:
+                candidates.append((len(ns), idx, ch))
+    if vocal:
+        return vocal
+    if candidates:
+        _, idx, ch = max(candidates)
+        return {(idx, ch)}
+    return set()
+
+def reduce_polyphony(events, max_notes, low_first=False):
+    """
+    events: [(틱, 순서, 'on'/'off', 원본키, 음, 세기, 우선순위)]
+    - 같은 순간 같은 음은 한 번만
+    - 동시에 max_notes개까지만 (우선순위 높은 음 우선, 같은 우선순위면 맨 위/맨 아래 음 우선)
+    - 자리가 없으면 더 낮은 우선순위(또는 먼저 눌려 있던 같은 우선순위) 음을 떼고 새 음을 누름
+    반환: [(틱, Message)], 버린 음표 수
+    """
+    out = []
+    dropped = 0
+    active = {}      # 음 -> (원본키, 우선순위, 누른 틱)
+    accepted = {}    # 원본키 -> 음
+    events = sorted(events, key=lambda e: (e[0], 0 if e[2] == 'off' else 1, e[1]))
+
+    def order_chord(cands):
+        by_tier = {}
+        for c in cands:
+            by_tier.setdefault(c[6], []).append(c)
+        ordered = []
+        for tier in sorted(by_tier):
+            group = sorted(by_tier[tier], key=lambda c: c[4], reverse=not low_first)
+            if len(group) > 2 and not low_first:
+                group = [group[0], group[-1]] + group[1:-1]  # 맨 위(멜로디) + 맨 아래(근음) 먼저
+            ordered += group
+        return ordered
+
+    i = 0
+    while i < len(events):
+        tick = events[i][0]
+        j = i
+        while j < len(events) and events[j][0] == tick:
+            j += 1
+        batch = events[i:j]
+        for e in batch:
+            if e[2] != 'off':
+                continue
+            pitch = accepted.pop(e[3], None)
+            if pitch is not None and active.get(pitch, (None,))[0] == e[3]:
+                del active[pitch]
+                out.append((tick, Message('note_off', note=pitch, velocity=0)))
+        for c in order_chord([e for e in batch if e[2] == 'on']):
+            _, _, _, src, pitch, vel, tier = c
+            if tier >= SIMPLIFY_DROP:
+                dropped += 1
+                continue
+            if pitch in active:
+                if active[pitch][2] == tick:
+                    dropped += 1  # 같은 순간 같은 음 중복
+                    continue
+                accepted.pop(active[pitch][0], None)
+                out.append((tick, Message('note_off', note=pitch, velocity=0)))
+                del active[pitch]
+            elif max_notes is not None and len(active) >= max_notes:
+                victims = [(t, -since, p) for p, (_, t, since) in active.items()
+                           if since < tick and (t > tier or t == tier)]
+                if not victims:
+                    dropped += 1
+                    continue
+                _, _, vp = max(victims)
+                accepted.pop(active[vp][0], None)
+                del active[vp]
+                out.append((tick, Message('note_off', note=vp, velocity=0)))
+            active[pitch] = (src, tier, tick)
+            accepted[src] = pitch
+            out.append((tick, Message('note_on', note=pitch, velocity=vel)))
+        i = j
+    return out, dropped
+
+def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True, simplify=False):
     """지정된 단일 악기(drum, guitar, bass, keyboard)를 추출하여 새 MidiFile 객체 생성"""
     cfg = INSTRUMENT_CONFIG[inst_key]
     new_mid = MidiFile(type=1)
@@ -427,7 +569,12 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
     # (이름 때문에 멜로디 트랙이 드럼 파일에 섞여 들어가는 것 방지)
     drum_by_name = not file_has_drum_channel(mid)
 
-    for track in mid.tracks:
+    # 간소화: 모든 트랙의 음표를 모아서 한 트랙으로 정리 (드럼은 제외)
+    simplify = simplify and SIMPLIFY_MAX_NOTES.get(inst_key) is not None
+    collected = []
+    melody_sources = detect_melody_sources(mid, drum_by_name) if simplify and inst_key == 'keyboard' else set()
+
+    for track_idx, track in enumerate(mid.tracks):
         info = analyze_track_instrument(track, drum_by_name)
         if info['total_notes'] == 0:
             continue
@@ -500,14 +647,35 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
                     total_notes_extracted += 1
                     has_valid_note = True
 
+            if simplify:
+                if msg.type in ('note_on', 'note_off'):
+                    prog = channel_program.get(msg.channel, min(info['programs']) if info['programs'] else None)
+                    tier = simplify_tier(inst_key, prog, (track_idx, msg.channel) in melody_sources)
+                    kind = 'on' if is_note_on(msg) else 'off'
+                    collected.append((abs_tick, len(collected), kind, (track_idx, msg.channel, msg.note),
+                                      msg.note, getattr(msg, 'velocity', 0), tier))
+                continue
+
             for out in out_msgs:
                 if force_ch0:
                     out = out.copy(channel=0)
                 emit(out)
 
+        if simplify:
+            continue
         if has_valid_note:
             part_indices.append(len(new_mid.tracks))
             new_mid.tracks.append(new_track)
+
+    if simplify and collected:
+        reduced, _ = reduce_polyphony(collected, SIMPLIFY_MAX_NOTES[inst_key], low_first=(inst_key == 'bass'))
+        total_notes_extracted = sum(1 for _, m in reduced if m.type == 'note_on')
+        if total_notes_extracted:
+            track = MidiTrack([MetaMessage('track_name', name=cfg['suffix'].strip(' ()'))])
+            events = [(0, track[0])] + [(t, m) for t, m in reduced]
+            track = to_track(events)
+            part_indices.append(len(new_mid.tracks))
+            new_mid.tracks.append(track)
 
     if align_timeline:
         align_to_song_timeline(new_mid, part_indices, song_timeline(mid))
@@ -620,7 +788,7 @@ def load_midi(input_path):
         data, _ = repair_smf_bytes(f.read())
     return MidiFile(file=io.BytesIO(data)), True
 
-def extract_selected_instruments(input_path, selected_keys, force_ch0=True):
+def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True):
     """
     밴드스코어에서 사용자가 선택한 악기 목록(drum, guitar, bass, keyboard)을 각각 추출하여 저장합니다.
     """
@@ -639,7 +807,7 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True):
         if inst_key not in INSTRUMENT_CONFIG:
             continue
         cfg = INSTRUMENT_CONFIG[inst_key]
-        new_mid, total_notes, mapped_notes = extract_single_instrument(mid, inst_key, force_ch0=force_ch0)
+        new_mid, total_notes, mapped_notes = extract_single_instrument(mid, inst_key, force_ch0=force_ch0, simplify=simplify)
 
         # 노트가 1개 이상 추출된 경우에만 파일 저장
         if total_notes > 0:

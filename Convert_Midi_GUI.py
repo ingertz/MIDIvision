@@ -72,7 +72,7 @@ class MidiConverterGUI(*_GUI_BASES):
         ctk.set_default_color_theme("blue")
 
         self.title("스타 레조넌스 밴드스코어 악기 분리 추출기")
-        self.geometry("760x750")
+        self.geometry("780x790")
         self.minsize(700, 650)
 
         self.last_output_dir = None
@@ -265,6 +265,16 @@ class MidiConverterGUI(*_GUI_BASES):
         )
         self.chk_force_ch0.select()
         self.chk_force_ch0.pack(anchor="w", padx=14, pady=(6, 3))
+
+        self.chk_simplify = ctk.CTkCheckBox(
+            info_frame,
+            text="화음/트랙 간소화 (패드·효과음 제거, 동시 음 수 제한: 건반 3 / 기타 3 / 베이스 1, 멜로디 보존)",
+            font=ctk.CTkFont(family="Malgun Gothic", size=11),
+            onvalue=True,
+            offvalue=False
+        )
+        self.chk_simplify.select()
+        self.chk_simplify.pack(anchor="w", padx=14, pady=(0, 3))
 
         mapping_title = ctk.CTkLabel(
             info_frame,
@@ -460,21 +470,22 @@ class MidiConverterGUI(*_GUI_BASES):
 
         # Tk 위젯은 메인 스레드에서만 접근해야 하므로 작업 스레드 시작 전에 값을 읽고 버튼 상태를 바꿈
         force_ch0 = bool(self.chk_force_ch0.get())
+        simplify = bool(self.chk_simplify.get())
         self.is_running = True
         self.btn_convert_now.configure(state="disabled", text="⏳ 추출 작업 중...")
         self.btn_select_files.configure(state="disabled")
         self.btn_select_folder.configure(state="disabled")
-        threading.Thread(target=self.process_files, args=(list(file_list), selected_keys, force_ch0), daemon=True).start()
+        threading.Thread(target=self.process_files, args=(list(file_list), selected_keys, force_ch0, simplify), daemon=True).start()
 
-    def process_files(self, file_list, selected_keys, force_ch0):
+    def process_files(self, file_list, selected_keys, force_ch0, simplify):
         try:
-            self._process_files(file_list, selected_keys, force_ch0)
+            self._process_files(file_list, selected_keys, force_ch0, simplify)
         except Exception as e:
             self.log(f"❌ 예기치 못한 오류: {e}\n")
         finally:
             self.call_in_main(self.on_conversion_finished)
 
-    def _process_files(self, file_list, selected_keys, force_ch0):
+    def _process_files(self, file_list, selected_keys, force_ch0, simplify):
         names = [INSTRUMENT_CONFIG[k]['name'] for k in selected_keys]
         self.log(f"🚀 작업 시작: 선택된 악기 파트 [{', '.join(names)}]\n")
 
@@ -486,7 +497,7 @@ class MidiConverterGUI(*_GUI_BASES):
             self.log(f"[{idx}/{len(file_list)}] 분석 및 추출 중: {file_name}\n")
 
             try:
-                results = extract_selected_instruments(file_path, selected_keys, force_ch0=force_ch0)
+                results = extract_selected_instruments(file_path, selected_keys, force_ch0=force_ch0, simplify=simplify)
                 if results:
                     for res in results:
                         total_extracted_files += 1
