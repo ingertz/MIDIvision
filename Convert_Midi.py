@@ -490,6 +490,7 @@ def reduce_polyphony(events, max_notes, low_first=False):
     - 같은 순간 같은 음은 한 번만
     - 동시에 max_notes개까지만 (우선순위 높은 음 우선, 같은 우선순위면 맨 위/맨 아래 음 우선)
     - 자리가 없으면 더 낮은 우선순위(또는 먼저 눌려 있던 같은 우선순위) 음을 떼고 새 음을 누름
+    - 멜로디(우선순위 0)가 울리는 동안 반주는 멜로디보다 높은 음을 치지 않음 (멜로디가 항상 맨 위)
     반환: [(틱, Message)], 버린 음표 수
     """
     out = []
@@ -529,7 +530,20 @@ def reduce_polyphony(events, max_notes, low_first=False):
             if tier >= SIMPLIFY_DROP:
                 dropped += 1
                 continue
+            melody_pitches = [p for p, (_, t, _) in active.items() if t == 0]
+            if tier != 0 and melody_pitches and pitch > min(melody_pitches):
+                dropped += 1  # 멜로디보다 높은 반주음
+                continue
+            if tier == 0:
+                # 새 멜로디 음보다 높게 울리고 있는 반주음은 뗌
+                for p in [p for p, (_, t, _) in active.items() if t != 0 and p > pitch]:
+                    accepted.pop(active[p][0], None)
+                    del active[p]
+                    out.append((tick, Message('note_off', note=p, velocity=0)))
             if pitch in active:
+                if active[pitch][1] == 0 and tier != 0:
+                    dropped += 1  # 멜로디가 누르고 있는 음을 반주가 빼앗지 않음
+                    continue
                 if active[pitch][2] == tick:
                     dropped += 1  # 같은 순간 같은 음 중복
                     continue
