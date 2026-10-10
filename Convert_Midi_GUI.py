@@ -37,7 +37,8 @@ try:
     from tkinter import filedialog, messagebox
     import customtkinter as ctk
     # 변환 로직은 Convert_Midi.py 한 곳에서만 관리 (GUI/CLI 결과가 달라지는 문제 방지)
-    from Convert_Midi import INSTRUMENT_CONFIG, extract_selected_instruments, is_generated_file
+    from Convert_Midi import (INSTRUMENT_CONFIG, INPUT_EXTS, MIDI_EXTS, SCORE_EXTS,
+                              extract_selected_instruments, is_generated_file)
 except Exception:
     report_fatal_error(*sys.exc_info())
     sys.exit(1)
@@ -100,7 +101,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         desc_label = ctk.CTkLabel(
             header_frame, 
-            text="밴드 MIDI에서 원하는 파트를 선택 추출합니다. 드럼(음계 이동), 기타/베이스(원음 보존), 건반(보컬·색소폰·관현악 등 포함 원음 보존)",
+            text="밴드 MIDI / PDF 악보에서 원하는 파트를 선택 추출합니다. 드럼(음계 이동), 기타/베이스(원음 보존), 건반(보컬·색소폰·관현악 등 포함 원음 보존)",
             font=ctk.CTkFont(family="Malgun Gothic", size=12),
             text_color="#9AA0A6"
         )
@@ -219,7 +220,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         self.drop_label = ctk.CTkLabel(
             self.drop_frame,
-            text="여기에 MIDI 파일(.mid)을 끌어다 놓으세요 (드래그 & 드롭)",
+            text="여기에 MIDI(.mid) 또는 악보(.pdf / .mxl) 파일을 끌어다 놓으세요 (드래그 & 드롭)",
             font=ctk.CTkFont(family="Malgun Gothic", size=15, weight="bold"),
             text_color="#E2E8F0"
         )
@@ -230,7 +231,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         self.btn_select_files = ctk.CTkButton(
             btn_container,
-            text="📁 MIDI 파일 직접 선택",
+            text="📁 MIDI / 악보 파일 직접 선택",
             font=ctk.CTkFont(family="Malgun Gothic", size=13, weight="bold"),
             fg_color="#2563EB",
             hover_color="#1D4ED8",
@@ -353,6 +354,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         self.log("✅ 프로그램이 준비되었습니다.\n")
         self.log("💡 상단에서 추출할 악기(드럼/기타/베이스/건반)를 체크한 뒤 MIDI 파일을 드래그하세요.\n")
+        self.log("   * PDF 악보도 가능 (무료 프로그램 Audiveris 설치 필요, 악보 상태에 따라 인식이 부정확할 수 있음)\n")
         self.log("   * 드럼: 스타 레조넌스 인게임 건반 노트로 자동 이동\n")
         self.log("   * 기타/베이스/건반: 원본 음계 그대로 보존\n" + "-"*68 + "\n")
 
@@ -411,31 +413,39 @@ class MidiConverterGUI(*_GUI_BASES):
         for path in decoded_files:
             if os.path.isdir(path):
                 midi_files.extend(self.find_midi_files(path))
-            elif os.path.isfile(path) and path.lower().endswith(('.mid', '.midi')):
+            elif os.path.isfile(path) and path.lower().endswith(INPUT_EXTS):
                 midi_files.append(path)
 
         if not midi_files:
-            self.log("⚠️ 드롭된 항목 중 .mid 파일을 찾을 수 없습니다.\n")
+            self.log("⚠️ 드롭된 항목 중 MIDI(.mid) / 악보(.pdf, .mxl) 파일을 찾을 수 없습니다.\n")
             return
 
-        self.log(f"📥 드래그 앤 드롭으로 {len(midi_files)}개의 MIDI 파일이 감지되었습니다.\n")
+        self.log(f"📥 드래그 앤 드롭으로 {len(midi_files)}개의 파일이 감지되었습니다.\n")
         self.selected_files = midi_files
         self.start_conversion_thread(midi_files)
 
     @staticmethod
     def find_midi_files(folder):
-        """폴더 내 MIDI 파일 검색 (이전에 생성된 '(Drum)' 등 결과 파일은 재변환하지 않도록 제외)"""
+        """
+        폴더 내 MIDI / 악보 파일 검색 (이전에 생성된 '(Drum)' 등 결과 파일은 재변환하지 않도록 제외)
+        같은 이름의 MIDI가 있는 악보는 제외 (둘 다 변환하면 결과 파일이 서로 덮어씀)
+        """
         midi_files = []
         for root, _, filenames in os.walk(folder):
+            midi_names = {os.path.splitext(fn)[0].lower() for fn in filenames if fn.lower().endswith(MIDI_EXTS)}
             for fn in filenames:
-                if fn.lower().endswith(('.mid', '.midi')) and not is_generated_file(fn):
-                    midi_files.append(os.path.join(root, fn))
+                if not fn.lower().endswith(INPUT_EXTS) or is_generated_file(fn):
+                    continue
+                if fn.lower().endswith(SCORE_EXTS) and os.path.splitext(fn)[0].lower() in midi_names:
+                    continue
+                midi_files.append(os.path.join(root, fn))
         return midi_files
 
     def select_files(self):
         files = filedialog.askopenfilenames(
-            title="변환할 MIDI 파일들을 선택하세요",
-            filetypes=[("MIDI Files", "*.mid *.midi"), ("All Files", "*.*")]
+            title="변환할 MIDI / 악보 파일들을 선택하세요",
+            filetypes=[("MIDI / 악보", "*.mid *.midi *.pdf *.mxl *.musicxml"), ("MIDI Files", "*.mid *.midi"),
+                       ("악보 (PDF / MusicXML)", "*.pdf *.mxl *.musicxml"), ("All Files", "*.*")]
         )
         if files:
             self.selected_files = list(files)
@@ -443,15 +453,15 @@ class MidiConverterGUI(*_GUI_BASES):
             self.start_conversion_thread(self.selected_files)
 
     def select_folder(self):
-        folder = filedialog.askdirectory(title="MIDI 파일이 있는 폴더를 선택하세요")
+        folder = filedialog.askdirectory(title="MIDI / 악보 파일이 있는 폴더를 선택하세요")
         if folder:
             midi_files = self.find_midi_files(folder)
             if midi_files:
                 self.selected_files = midi_files
-                self.log(f"📂 폴더 내 {len(midi_files)}개의 MIDI 파일이 감지되었습니다.\n")
+                self.log(f"📂 폴더 내 {len(midi_files)}개의 파일이 감지되었습니다.\n")
                 self.start_conversion_thread(midi_files)
             else:
-                self.log(f"⚠️ 선택한 폴더에 .mid 파일이 없습니다: {folder}\n")
+                self.log(f"⚠️ 선택한 폴더에 MIDI / 악보 파일이 없습니다: {folder}\n")
 
     def convert_selected(self):
         if not self.selected_files:
@@ -497,7 +507,8 @@ class MidiConverterGUI(*_GUI_BASES):
             self.log(f"[{idx}/{len(file_list)}] 분석 및 추출 중: {file_name}\n")
 
             try:
-                results = extract_selected_instruments(file_path, selected_keys, force_ch0=force_ch0, simplify=simplify)
+                results = extract_selected_instruments(file_path, selected_keys, force_ch0=force_ch0, simplify=simplify,
+                                                       log=lambda text: self.log(text + "\n"))
                 if results:
                     for res in results:
                         total_extracted_files += 1
@@ -558,7 +569,7 @@ def main():
 def _main():
     if len(sys.argv) > 1:
         args = sys.argv[1:]
-        midi_files = [f for f in args if f.lower().endswith(('.mid', '.midi'))]
+        midi_files = [f for f in args if f.lower().endswith(INPUT_EXTS)]
         if midi_files:
             app = MidiConverterGUI()
             app.after(300, lambda: app.on_drop(midi_files))

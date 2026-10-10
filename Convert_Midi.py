@@ -5,6 +5,9 @@ import sys
 import os
 import re
 
+# 악보 파일(PDF / MusicXML)은 Convert_Score.py가 MIDI로 바꾼 뒤 같은 방식으로 분리
+from Convert_Score import SCORE_EXTS, score_to_midi
+
 # GM 드럼 노트 번호 -> 스타 레조넌스 건반 노트 번호 정밀 매핑 테이블
 # 인게임 건반:
 # F  = F4 (65) : 베이스 드럼 (Kick)
@@ -929,18 +932,26 @@ def load_midi(input_path):
         data, _ = repair_smf_bytes(f.read())
     return MidiFile(file=io.BytesIO(data)), True
 
-def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True):
+MIDI_EXTS = ('.mid', '.midi')
+INPUT_EXTS = MIDI_EXTS + SCORE_EXTS
+
+def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True, log=print):
     """
     밴드스코어에서 사용자가 선택한 악기 목록(drum, guitar, bass, keyboard)을 각각 추출하여 저장합니다.
+    MIDI 외에 PDF 악보 / MusicXML도 받습니다 (결과는 항상 .mid).
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"파일을 찾을 수 없습니다: {input_path}")
 
-    mid, repaired = load_midi(input_path)
-    if repaired:
-        print(f"⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다: {os.path.basename(input_path)}")
     dir_name, file_name = os.path.split(input_path)
     base_name, ext = os.path.splitext(file_name)
+    if ext.lower() in SCORE_EXTS:
+        mid = score_to_midi(input_path, log=log)
+        ext = '.mid'
+    else:
+        mid, repaired = load_midi(input_path)
+        if repaired:
+            print(f"⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다: {os.path.basename(input_path)}")
     out_base = strip_known_suffixes(base_name)
 
     results = []
@@ -998,7 +1009,7 @@ if __name__ == "__main__":
         print("   * 기타/베이스/건반: 원본 음계 보존")
         print("="*65)
         for arg in sys.argv[1:]:
-            if os.path.exists(arg) and arg.lower().endswith(('.mid', '.midi')):
+            if os.path.exists(arg) and arg.lower().endswith(INPUT_EXTS):
                 print(f"\n처리 중: {os.path.basename(arg)}")
                 # CLI 기본값: 4대 악기 모두 추출
                 try:
