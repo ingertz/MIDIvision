@@ -307,7 +307,11 @@ def empty_measure(number=None):
             'ending_open': None,   # 페이지 데이터에서 읽은 괄호 시작 여부 (None = 정보 없음)
             'xs': [],              # notes 와 짝을 이루는 음표의 가로 위치 (모르면 None)
             'width': 0,            # 마디 너비 (가로 위치와 같은 단위)
-            'loose': None}         # 이 순번부터의 음표는 시간을 어림한 것 (가로 위치로 다시 정함)
+            'loose': None,         # 이 순번부터의 음표는 시간을 어림한 것 (가로 위치로 다시 정함)
+            'only': [],            # notes 와 짝: 몇 번째 연주 때만 치는 음인지 (1 = 처음만, 2 = 두 번째부터, None = 항상)
+            'segno': False,        # 세뇨 기호가 있는 마디 (D.S. 로 돌아오는 곳)
+            'tocoda': False,       # To Coda: D.S. 로 돌아온 뒤 이 마디까지 치고 코다로 건너뜀
+            'coda': False}         # 코다가 시작하는 마디
 
 def align_measures(parsed):
     """
@@ -453,8 +457,11 @@ def parse_part(part, drum_instruments, clef_drums=False):
 
 def playback_order(marks):
     """
-    도돌이표 / 1번·2번 괄호를 풀어서 실제 연주되는 마디 순서를 만듭니다.
-    (D.S. / D.C. / Coda 점프는 처리하지 않고 적힌 순서대로 연주)
+    도돌이표 / 1번·2번 괄호 / D.S.(D.C.) al Coda 를 풀어서 실제 연주되는 마디 순서를 만듭니다.
+
+    D.S. al Coda: 코다 바로 앞 마디까지 연주한 뒤 세뇨 기호로 돌아가고(세뇨가 없으면 D.C. = 처음으로),
+    To Coda 표시가 있는 마디까지 연주한 다음 코다로 건너뜁니다. 돌아간 뒤에는 도돌이를 하지 않고
+    괄호는 마지막 것만 연주합니다.
     """
     # 괄호 구간 [시작 마디, 끝 마디, 번호]
     # 괄호는 다음 도돌이표까지 이어짐. 밴드스코어는 괄호 선을 처음 한두 마디에만 긋고
@@ -484,24 +491,51 @@ def playback_order(marks):
     # 악보 인식은 "Howling ┌──┐" 같은 주법 표시도 괄호로 읽으므로, 1번 괄호가 도돌이표로 끝나고
     # 그 바로 뒤에 이어지는 괄호만 진짜로 인정 (가짜 괄호를 믿으면 마디를 통째로 건너뜀)
     endings = [None] * len(marks)
+    final = [True] * len(marks)      # 이어진 괄호들 중 마지막 괄호에 속한 마디인지
+    opened = [0] * len(marks)        # 그 마디가 속한 괄호가 시작하는 마디
     valid_stop = None
+    previous = None
     for first, last, numbers in spans:
         if 1 in numbers:
             valid = bool(marks[last]['backward'])
         else:
             valid = valid_stop is not None and first == valid_stop + 1
         if valid:
+            if previous is not None and first == valid_stop + 1:
+                for i in range(previous[0], previous[1] + 1):
+                    final[i] = False
             valid_stop = last
+            previous = (first, last)
             for i in range(first, last + 1):
                 endings[i] = numbers
+                opened[i] = first
         elif first != valid_stop:
-            valid_stop = None
+            valid_stop = previous = None
+
+    # D.S. al Coda 에 필요한 자리들
+    coda = next((i for i, m in enumerate(marks) if m.get('coda')), None)
+    tocoda = next((i for i, m in enumerate(marks) if m.get('tocoda')), None)
+    segno = next((i for i, m in enumerate(marks) if m.get('segno')), 0)
+    jump_at = coda - 1 if coda and tocoda is not None and segno <= tocoda < coda - 1 else None
 
     order = []
     i = start = 0
     pass_no = 1
+    returned = False      # D.S. 로 돌아온 뒤인지
     while i < len(marks) and len(order) < len(marks) * 20:
         m = marks[i]
+        if returned:
+            # 돌아온 뒤에 새로 만나는 괄호는 마지막 것만 연주 (세뇨가 괄호 안에 있으면 그 괄호는 그대로 이어서 연주)
+            if endings[i] is not None and not final[i] and opened[i] > segno:
+                i += 1
+                continue
+            order.append(i)
+            if i == tocoda:
+                i, returned, jump_at = coda, False, None
+                start, pass_no = i, 1
+                continue
+            i += 1
+            continue
         if endings[i] is None and i > 0 and endings[i - 1] is not None and pass_no > 1:
             start, pass_no = i, 1   # 마지막 괄호를 빠져나옴 -> 새 구간 시작
         if m['forward'] and start != i:
@@ -518,6 +552,9 @@ def playback_order(marks):
                 continue
             if endings[i] is None:
                 start, pass_no = i + 1, 1
+        if i == jump_at:
+            i, returned = segno, True
+            continue
         i += 1
     return order
 
@@ -833,6 +870,10 @@ def expand_score(parsed, from_audiveris):
             if mark['backward']:
                 opened = False
 
+    for i, mark in enumerate(marks):
+        for name in ('segno', 'tocoda', 'coda'):
+            mark[name] = any(p['measures'][i].get(name) for p in parsed if i < len(p['measures']))
+
     # 페이지 데이터에서 읽은 괄호 시작 표시가 있으면 MusicXML의 괄호 대신 사용.
     # 번호는 글자 인식 없이는 알 수 없으므로 순서로 정함: 처음 열리는 괄호가 1번, 도돌이표 다음에 열리는 괄호가 2번
     in_first = second_next = False
@@ -858,17 +899,24 @@ def expand_score(parsed, from_audiveris):
     for p in parsed:
         notes = []
         open_ties = {}
+        played = collections.Counter()
         for i, base in zip(order, bases):
             if i >= len(p['measures']):
                 continue
             m = p['measures'][i]
+            played[i] += 1
+            only = m.get('only') or []
             for at, bpm in m['tempos']:
                 if bpm > 0 and (base + at, bpm) not in score['tempos']:
                     score['tempos'].append((base + at, bpm))
             # 박자는 모든 파트에 똑같이 적혀 있으므로 첫 파트 것만 사용
             if p is parsed[0] and m['time'] and (not score['times'] or score['times'][-1][1] != m['time']):
                 score['times'].append((base, m['time']))
-            for start, dur, note, is_drum, tie_start, tie_stop in m['notes']:
+            for k, (start, dur, note, is_drum, tie_start, tie_stop) in enumerate(m['notes']):
+                # "2×" 처럼 몇 번째 연주 때만 치는 음: 1 = 처음만, 2 = 두 번째부터
+                when = only[k] if k < len(only) else None
+                if when is not None and (played[i] == 1) != (when == 1):
+                    continue
                 key = (is_drum, note)
                 begin = base + start
                 tied = open_ties.pop(key, None) if tie_stop else None
