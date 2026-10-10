@@ -73,7 +73,7 @@ class MidiConverterGUI(*_GUI_BASES):
         ctk.set_default_color_theme("blue")
 
         self.title("스타 레조넌스 밴드스코어 악기 분리 추출기")
-        self.geometry("780x790")
+        self.geometry("780x820")
         self.minsize(700, 650)
 
         self.last_output_dir = None
@@ -276,6 +276,25 @@ class MidiConverterGUI(*_GUI_BASES):
         )
         self.chk_simplify.select()
         self.chk_simplify.pack(anchor="w", padx=14, pady=(0, 3))
+
+        bpm_row = ctk.CTkFrame(info_frame, fg_color="transparent")
+        bpm_row.pack(anchor="w", padx=14, pady=(0, 4))
+        ctk.CTkLabel(
+            bpm_row,
+            text="악보(PDF) 템포 BPM:",
+            font=ctk.CTkFont(family="Malgun Gothic", size=11)
+        ).pack(side="left")
+        self.entry_score_bpm = ctk.CTkEntry(
+            bpm_row, width=60, height=24, placeholder_text="120",
+            font=ctk.CTkFont(family="Malgun Gothic", size=11)
+        )
+        self.entry_score_bpm.pack(side="left", padx=6)
+        ctk.CTkLabel(
+            bpm_row,
+            text="악보에서 템포를 못 읽었을 때만 사용 (악보 첫 줄의 ♩= 숫자)",
+            font=ctk.CTkFont(family="Malgun Gothic", size=10),
+            text_color="#94A3B8"
+        ).pack(side="left")
 
         mapping_title = ctk.CTkLabel(
             info_frame,
@@ -481,21 +500,36 @@ class MidiConverterGUI(*_GUI_BASES):
         # Tk 위젯은 메인 스레드에서만 접근해야 하므로 작업 스레드 시작 전에 값을 읽고 버튼 상태를 바꿈
         force_ch0 = bool(self.chk_force_ch0.get())
         simplify = bool(self.chk_simplify.get())
+        score_bpm = self.get_score_bpm()
         self.is_running = True
         self.btn_convert_now.configure(state="disabled", text="⏳ 추출 작업 중...")
         self.btn_select_files.configure(state="disabled")
         self.btn_select_folder.configure(state="disabled")
-        threading.Thread(target=self.process_files, args=(list(file_list), selected_keys, force_ch0, simplify), daemon=True).start()
+        threading.Thread(target=self.process_files, args=(list(file_list), selected_keys, force_ch0, simplify, score_bpm), daemon=True).start()
 
-    def process_files(self, file_list, selected_keys, force_ch0, simplify):
+    def get_score_bpm(self):
+        """템포 칸에 적힌 BPM (비었거나 잘못된 값이면 None)"""
+        text = self.entry_score_bpm.get().strip()
+        if not text:
+            return None
         try:
-            self._process_files(file_list, selected_keys, force_ch0, simplify)
+            bpm = float(text)
+        except ValueError:
+            bpm = 0
+        if not 20 <= bpm <= 400:
+            self.log(f"⚠️ 템포 칸의 값({text})은 쓸 수 없어 무시합니다. (20~400 사이 숫자)\n")
+            return None
+        return bpm
+
+    def process_files(self, file_list, selected_keys, force_ch0, simplify, score_bpm):
+        try:
+            self._process_files(file_list, selected_keys, force_ch0, simplify, score_bpm)
         except Exception as e:
             self.log(f"❌ 예기치 못한 오류: {e}\n")
         finally:
             self.call_in_main(self.on_conversion_finished)
 
-    def _process_files(self, file_list, selected_keys, force_ch0, simplify):
+    def _process_files(self, file_list, selected_keys, force_ch0, simplify, score_bpm):
         names = [INSTRUMENT_CONFIG[k]['name'] for k in selected_keys]
         self.log(f"🚀 작업 시작: 선택된 악기 파트 [{', '.join(names)}]\n")
 
@@ -508,7 +542,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
             try:
                 results = extract_selected_instruments(file_path, selected_keys, force_ch0=force_ch0, simplify=simplify,
-                                                       log=lambda text: self.log(text + "\n"))
+                                                       log=lambda text: self.log(text + "\n"), score_bpm=score_bpm)
                 if results:
                     for res in results:
                         total_extracted_files += 1

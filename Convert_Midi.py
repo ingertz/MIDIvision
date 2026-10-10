@@ -840,6 +840,9 @@ def strip_known_suffixes(base_name):
 def is_generated_file(path):
     """이 프로그램이 만든 결과 파일인지 (폴더 일괄 처리 시 재변환 방지용)"""
     base = os.path.splitext(os.path.basename(path))[0]
+    # '(Drum)_01_곡명' 처럼 악기를 앞으로 옮겨 이름을 바꾼 결과 파일도 포함
+    if any(base.startswith(cfg['suffix'].strip() + '_') for cfg in INSTRUMENT_CONFIG.values()):
+        return True
     return strip_known_suffixes(base) != base
 
 def repair_smf_bytes(data):
@@ -935,10 +938,11 @@ def load_midi(input_path):
 MIDI_EXTS = ('.mid', '.midi')
 INPUT_EXTS = MIDI_EXTS + SCORE_EXTS
 
-def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True, log=print):
+def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True, log=print, score_bpm=None):
     """
     밴드스코어에서 사용자가 선택한 악기 목록(drum, guitar, bass, keyboard)을 각각 추출하여 저장합니다.
     MIDI 외에 PDF 악보 / MusicXML도 받습니다 (결과는 항상 .mid).
+    score_bpm: 악보에서 템포를 읽지 못했을 때 쓸 템포
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"파일을 찾을 수 없습니다: {input_path}")
@@ -946,7 +950,7 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simp
     dir_name, file_name = os.path.split(input_path)
     base_name, ext = os.path.splitext(file_name)
     if ext.lower() in SCORE_EXTS:
-        mid = score_to_midi(input_path, log=log)
+        mid = score_to_midi(input_path, log=log, fallback_bpm=score_bpm)
         ext = '.mid'
     else:
         mid, repaired = load_midi(input_path)
