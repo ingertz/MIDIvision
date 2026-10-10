@@ -33,6 +33,15 @@ AUDIVERIS_DOWNLOAD_URL = 'https://github.com/Audiveris/audiveris/releases'
 #   켜는 순간 Audiveris가 TAB 줄만 찾고 5선 보표를 전부 놓쳐서 음표가 하나도 안 나옴
 AUDIVERIS_SWITCHES = ('drumNotation', 'crossHeads')
 
+# 글자 인식(OCR) 언어 설정. 본 인식에서는 설치되지 않은 언어를 지정해서 OCR을 끔:
+# 밴드스코어는 파트 이름이 세로로 적혀 있어 엉뚱한 글자로 읽히고, 페이지마다 다르게 읽힌 이름 때문에
+# Audiveris가 같은 파트를 서로 다른 파트로 취급해서 파트가 두 배로 쪼개짐
+OCR_LANGUAGE = 'org.audiveris.omr.text.Language.defaultSpecification'
+OCR_OFF = 'zzz'
+# 템포 표시(♩= 192)는 작은 글자라 기본 해상도(300)에서는 못 읽고 450에서 읽힘
+PDF_RESOLUTION = 'org.audiveris.omr.image.ImageLoading.pdfResolution'
+TEMPO_RESOLUTION = 450
+
 class AudiverisNotFoundError(RuntimeError):
     pass
 
@@ -52,10 +61,51 @@ def find_audiveris():
             return path
     return None
 
+def run_audiveris(exe, *args):
+    """Audiveris를 창 없이 실행. 반환: (종료 코드, 출력)"""
+    proc = subprocess.run(
+        [exe, '-batch', *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    return proc.returncode, proc.stdout.decode('utf-8', errors='replace')
+
+def find_exported(folder):
+    found = []
+    for root, _, filenames in os.walk(folder):
+        found += [os.path.join(root, fn) for fn in filenames if fn.lower().endswith(MUSICXML_EXTS + ('.xml',))]
+    return found
+
+def ocr_data_installed():
+    """Audiveris에 영어 글자 인식 데이터가 설치되어 있는지 (Audiveris 메뉴 Tools → Languages 에서 설치)"""
+    folders = [os.environ.get('TESSDATA_PREFIX'),
+               os.path.join(os.environ.get('APPDATA', ''), 'AudiverisLtd', 'audiveris', 'config', 'tessdata')]
+    return any(folder and os.path.isfile(os.path.join(folder, 'eng.traineddata')) for folder in folders)
+
+def read_pdf_tempo(src, work_dir, sheet):
+    """
+    악보의 메트로놈 표시(♩= 192)를 읽습니다. 못 읽으면 None.
+    글자 인식이 필요해서, 본 인식과 따로 템포가 적힌 첫 악보 페이지만 고해상도로 한 번 더 읽습니다.
+    """
+    exe = find_audiveris()
+    if exe is None or not ocr_data_installed():
+        return None
+    out_dir = os.path.join(work_dir, 'tempo')
+    run_audiveris(exe, '-transcribe', '-export', '-output', out_dir, '-sheets', str(sheet),
+                  '-constant', f'{PDF_RESOLUTION}={TEMPO_RESOLUTION}', '-constant', f'{OCR_LANGUAGE}=eng', '--', src)
+    for path in find_exported(out_dir):
+        try:
+            for sound in read_musicxml_root(path).iter('sound'):
+                bpm = float(sound.get('tempo') or 0)
+                if 20 <= bpm <= 400:
+                    return bpm
+        except (ValueError, ET.ParseError, zipfile.BadZipFile):
+            pass
+    return None
+
 def pdf_to_musicxml(pdf_path, work_dir, log=print):
     """
     Audiveris로 PDF 악보를 인식해서 MusicXML(.mxl)로 내보냅니다.
     악장이 나뉘거나 중간 페이지가 빠지면 파일이 여러 개 나오므로 순서대로 정렬한 목록을 반환합니다.
+    반환: (MusicXML 경로 목록, 인식에 성공한 첫 페이지 번호)
     """
     exe = find_audiveris()
     if exe is None:
@@ -71,22 +121,17 @@ def pdf_to_musicxml(pdf_path, work_dir, log=print):
     os.makedirs(out_dir, exist_ok=True)
 
     def run(*args):
-        proc = subprocess.run(
-            [exe, '-batch', *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        return proc.returncode, proc.stdout.decode('utf-8', errors='replace')
+        return run_audiveris(exe, *args)
 
     def exported():
-        found = []
-        for root, _, filenames in os.walk(out_dir):
-            found += [os.path.join(root, fn) for fn in filenames if fn.lower().endswith(MUSICXML_EXTS + ('.xml',))]
-        return found
+        return find_exported(out_dir)
 
-    switches = []
+    switches = ['-constant', f'{OCR_LANGUAGE}={OCR_OFF}']
     for switch in AUDIVERIS_SWITCHES:
         switches += ['-constant', f'org.audiveris.omr.sheet.ProcessingSwitches.{switch}=true']
     code, output = run('-transcribe', '-export', '-output', out_dir, *switches, '--', src)
     found = exported()
+    first_sheet = 1
 
     # 한 페이지라도 실패하면(오선이 없는 표지/가사 페이지, Audiveris 내부 오류 등) Audiveris는
     # 전체를 실패로 처리하고 아무것도 내보내지 않음. 인식 결과는 프로젝트(.omr)에 남아 있으므로
@@ -97,6 +142,7 @@ def pdf_to_musicxml(pdf_path, work_dir, log=print):
         failed = {int(n) for n in re.findall(
             r'\[score#(\d+)\][^\n]*(?:Error processing stub|flagged as invalid)', output)}
         good = [n for n in range(1, int(total.group(1)) + 1) if n not in failed] if total else []
+        first_sheet = good[0] if good else 1
         # 빠진 페이지를 사이에 두면 Audiveris가 악보를 둘로 나눠 같은 파일 이름에 덮어쓰므로
         # 연속된 페이지 묶음마다 따로 내보냄
         runs = []
@@ -126,8 +172,8 @@ def pdf_to_musicxml(pdf_path, work_dir, log=print):
         detail = '\n'.join(dict.fromkeys(w.split('|', 1)[-1].strip() for w in warnings))[-600:]
         raise RuntimeError(f"Audiveris가 악보를 인식하지 못했습니다 (종료 코드 {code}).\n{detail}")
     # run02/score.mvt2.mxl < run02/score.mvt10.mxl < run10/... 순서가 되도록 숫자 기준 정렬
-    return sorted(found, key=lambda p: [int(s) if s.isdigit() else s
-                                        for s in re.split(r'(\d+)', os.path.relpath(p, out_dir))])
+    found.sort(key=lambda p: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', os.path.relpath(p, out_dir))])
+    return found, first_sheet
 
 def read_musicxml_root(path):
     """MusicXML(.musicxml) 또는 압축 MusicXML(.mxl) 읽기"""
@@ -323,13 +369,29 @@ def playback_order(marks):
     도돌이표 / 1번·2번 괄호를 풀어서 실제 연주되는 마디 순서를 만듭니다.
     (D.S. / D.C. / Coda 점프는 처리하지 않고 적힌 순서대로 연주)
     """
-    # 괄호 구간 [시작 마디, 끝 마디, 번호] (닫는 표시를 못 읽은 괄호는 한 마디로 간주)
+    # 괄호 구간 [시작 마디, 끝 마디, 번호]
+    # 괄호는 다음 도돌이표까지 이어짐. 밴드스코어는 괄호 선을 처음 한두 마디에만 긋고
+    # 실제로는 몇 쪽 뒤의 도돌이표까지가 1번 괄호인 경우가 많음.
+    # 도돌이표가 없으면(마지막 괄호) 닫는 표시까지, 그것도 없으면 한 마디
     spans = []
     for i, m in enumerate(marks):
-        if m['ending_start']:
-            spans.append([i, i, m['ending_start']])
-        if m['ending_stop'] and spans:
-            spans[-1][1] = max(spans[-1][1], i)
+        if not m['ending_start']:
+            continue
+        last = None
+        for j in range(i, len(marks)):
+            if marks[j]['backward']:
+                last = j
+                break
+            if j > i and (marks[j]['ending_start'] or marks[j]['forward']):
+                break
+        if last is None:
+            last = i
+            while last + 1 < len(marks) and not marks[last]['ending_stop'] \
+                    and not marks[last + 1]['ending_start'] and not marks[last + 1]['forward']:
+                last += 1
+            if not marks[last]['ending_stop']:
+                last = i
+        spans.append((i, last, m['ending_start']))
 
     # 괄호가 걸친 마디에 괄호 번호를 표시.
     # 악보 인식은 "Howling ┌──┐" 같은 주법 표시도 괄호로 읽으므로, 1번 괄호가 도돌이표로 끝나고
@@ -341,10 +403,12 @@ def playback_order(marks):
             valid = bool(marks[last]['backward'])
         else:
             valid = valid_stop is not None and first == valid_stop + 1
-        valid_stop = last if valid else None
         if valid:
+            valid_stop = last
             for i in range(first, last + 1):
                 endings[i] = numbers
+        elif first != valid_stop:
+            valid_stop = None
 
     order = []
     i = start = 0
@@ -455,11 +519,44 @@ def name_part(name, program, part, role=None):
         return 'Bass', None
     return '', None
 
-def load_musicxml(path):
+def join_files(files):
     """
-    MusicXML 한 파일 -> 파트별 음표 목록 (시간은 4분음표 단위)
+    여러 파일(악장, 또는 인식 못 한 페이지 때문에 나뉜 묶음)의 파트를 마디 순서대로 이어 붙임.
+    파일마다 파트 수가 다를 수 있으므로 (이름, 같은 이름 중 몇 번째)로 짝을 맞추고,
+    그 파일에 없는 파트는 빈 마디로 채움. 도돌이표가 파일 경계를 넘어가도 풀 수 있게 하나로 합침
+    """
+    slots = {}
+    joined = []
+    done = 0
+    for parsed in files:
+        count = max(len(part['measures']) for part in parsed)
+        seen = collections.Counter()
+        for part in parsed:
+            key = (part['name'], seen[part['name']])
+            seen[part['name']] += 1
+            if key not in slots:
+                slots[key] = {**part, 'measures': [empty_measure() for _ in range(done)]}
+                joined.append(slots[key])
+            slots[key]['measures'] += part['measures']
+        done += count
+        for part in joined:
+            part['measures'] += [empty_measure() for _ in range(done - len(part['measures']))]
+    return joined
+
+def load_musicxml(path):
+    """MusicXML 한 파일 -> 파트별 음표 목록 (load_scores 참고)"""
+    return load_scores([path])
+
+def load_scores(paths):
+    """
+    MusicXML 파일(들) -> 파트별 음표 목록 (시간은 4분음표 단위)
     반환: {'parts': [{'name', 'program', 'notes': [[시작, 끝, 음, 드럼여부]]}], 'tempos', 'times', 'length'}
     """
+    files = [parse_musicxml(path) for path in paths]
+    return expand_score(join_files([parsed for parsed, _ in files]), any(scanned for _, scanned in files))
+
+def parse_musicxml(path):
+    """MusicXML 한 파일 -> (마디 단위로 읽은 파트 목록, Audiveris가 만든 파일인지)"""
     root = read_musicxml_root(path)
     from_audiveris = 'audiveris' in ' '.join(s.text or '' for s in root.iter('software')).lower()
 
@@ -497,6 +594,10 @@ def load_musicxml(path):
         parsed.append(p)
 
     align_measures(parsed)
+    return parsed, from_audiveris
+
+def expand_score(parsed, from_audiveris):
+    """마디 단위 파트 목록의 도돌이표를 풀어서 파트별 음표 목록으로 만듭니다."""
     n_measures = max(len(p['measures']) for p in parsed)
     # 스캔 악보에서 박자표를 못 읽었으면 가장 흔한 마디 길이를 박자로 간주
     guessed = None
@@ -516,12 +617,23 @@ def load_musicxml(path):
             # 마디 길이는 내용이 가장 긴 파트 기준 (못갖춘마디 대응).
             # 박자보다 길면 리듬을 잘못 읽은 것이므로 박자 길이로 맞춰서 다른 파트가 밀리지 않게 함
             lengths.append(min(extent, nominal) if nominal and extent else (nominal or extent))
-        marks.append({
-            'forward': any(m['forward'] for m in ms),
-            'backward': max(m['backward'] for m in ms),
-            'ending_start': next((m['ending_start'] for m in ms if m['ending_start']), None),
-            'ending_stop': any(m['ending_stop'] for m in ms),
-        })
+        if from_audiveris:
+            # 스캔 악보: 도돌이표는 절반 이상의 파트에서 읽혔을 때만, 괄호는 맨 위 보표에 있는 것만 인정.
+            # (TAB 줄, 8va 선, 주법 표시가 아래쪽 파트에서 괄호로 수없이 잘못 읽힘)
+            top = parsed[0]['measures'][i]
+            marks.append({
+                'forward': sum(m['forward'] for m in ms) * 2 >= len(ms),
+                'backward': max(m['backward'] for m in ms) if sum(bool(m['backward']) for m in ms) * 2 >= len(ms) else 0,
+                'ending_start': top['ending_start'],
+                'ending_stop': top['ending_stop'],
+            })
+        else:
+            marks.append({
+                'forward': any(m['forward'] for m in ms),
+                'backward': max(m['backward'] for m in ms),
+                'ending_start': next((m['ending_start'] for m in ms if m['ending_start']), None),
+                'ending_stop': any(m['ending_stop'] for m in ms),
+            })
 
     if from_audiveris:
         # 악보 인식은 끝세로줄 등을 도돌이표로 잘못 읽는 일이 있고, 가짜 도돌이표는 곡을 통째로 두 번 연주하게 만듦.
@@ -642,5 +754,13 @@ def score_to_midi(path, log=print, fallback_bpm=None):
         return scores_to_midi([load_musicxml(path)], fallback_bpm, log)
     with tempfile.TemporaryDirectory(prefix='midivision_') as work_dir:
         log("   PDF 악보 인식 중입니다 (Audiveris). 한 페이지에 20초쯤 걸립니다...")
-        xml_paths = pdf_to_musicxml(path, work_dir, log)
-        return scores_to_midi([load_musicxml(p) for p in xml_paths], fallback_bpm, log)
+        xml_paths, first_sheet = pdf_to_musicxml(path, work_dir, log)
+        scores = [load_scores(xml_paths)]
+        # 템포를 직접 적어 주지 않았으면 악보의 템포 표시를 읽어 봄
+        if fallback_bpm is None and not any(score['tempos'] for score in scores) and ocr_data_installed():
+            log("   템포 표시를 읽는 중입니다...")
+            bpm = read_pdf_tempo(os.path.join(work_dir, 'score.pdf'), work_dir, first_sheet)
+            if bpm:
+                log(f"   악보의 템포 표시를 읽었습니다: {bpm:g} BPM")
+                scores[0]['tempos'].append((Fraction(0), bpm))
+        return scores_to_midi(scores, fallback_bpm, log)

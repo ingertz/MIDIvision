@@ -285,13 +285,13 @@ class MidiConverterGUI(*_GUI_BASES):
             font=ctk.CTkFont(family="Malgun Gothic", size=11)
         ).pack(side="left")
         self.entry_score_bpm = ctk.CTkEntry(
-            bpm_row, width=60, height=24, placeholder_text="120",
+            bpm_row, width=60, height=24, placeholder_text="자동",
             font=ctk.CTkFont(family="Malgun Gothic", size=11)
         )
         self.entry_score_bpm.pack(side="left", padx=6)
         ctk.CTkLabel(
             bpm_row,
-            text="악보에서 템포를 못 읽었을 때만 사용 (악보 첫 줄의 ♩= 숫자)",
+            text="비우면 악보의 ♩= 숫자를 자동으로 읽음 (못 읽으면 120)",
             font=ctk.CTkFont(family="Malgun Gothic", size=10),
             text_color="#94A3B8"
         ).pack(side="left")
