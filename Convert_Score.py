@@ -1,4 +1,5 @@
 import collections
+import concurrent.futures
 import os
 import re
 import shutil
@@ -9,6 +10,8 @@ import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 from mido import MidiFile, MidiTrack, Message, MetaMessage, bpm2tempo
+
+import Convert_Pages
 
 # 악보 파일 -> MIDI 변환
 #   PDF 악보  --(Audiveris: 무료 악보 인식 프로그램)-->  MusicXML  -->  MIDI
@@ -38,9 +41,16 @@ AUDIVERIS_SWITCHES = ('drumNotation', 'crossHeads')
 # Audiveris가 같은 파트를 서로 다른 파트로 취급해서 파트가 두 배로 쪼개짐
 OCR_LANGUAGE = 'org.audiveris.omr.text.Language.defaultSpecification'
 OCR_OFF = 'zzz'
-# 템포 표시(♩= 192)는 작은 글자라 기본 해상도(300)에서는 못 읽고 450에서 읽힘
+# PDF를 그림으로 바꿀 때의 해상도. Audiveris 기본값은 300인데, 보표가 작은 밴드스코어는 450으로 읽어야
+# 점음표의 점과 임시표가 제대로 읽힘 (300에서는 점을 놓쳐서 그 뒤 음이 전부 반 박씩 당겨지고,
+# 조표를 놓쳐서 한 줄이 통째로 반음 틀리기도 함). 템포 표시(♩= 192)도 450에서만 읽힘.
+# A4 한 쪽이 450에서 약 1,960만 화소로, Audiveris의 한도(2,000만 화소)에 거의 닿으므로 더 올릴 수는 없음
 PDF_RESOLUTION = 'org.audiveris.omr.image.ImageLoading.pdfResolution'
-TEMPO_RESOLUTION = 450
+HIGH_RESOLUTION = 450
+# 450은 한 쪽에 1분쯤 걸려서 순서대로 하면 20쪽에 20분. 쪽들을 몇 묶음으로 나눠 Audiveris를 여러 개 띄움.
+# (Audiveris 자체의 동시 처리 옵션 processAllStubsInParallel 은 쓰면 안 됨: 내부 오류로 몇 쪽씩 실패하고,
+#  심하면 프로젝트 파일이 깨져서 거의 모든 쪽을 잃음)
+MAX_WORKERS = 6
 
 class AudiverisNotFoundError(RuntimeError):
     pass
@@ -90,7 +100,7 @@ def read_pdf_tempo(src, work_dir, sheet):
         return None
     out_dir = os.path.join(work_dir, 'tempo')
     run_audiveris(exe, '-transcribe', '-export', '-output', out_dir, '-sheets', str(sheet),
-                  '-constant', f'{PDF_RESOLUTION}={TEMPO_RESOLUTION}', '-constant', f'{OCR_LANGUAGE}=eng', '--', src)
+                  '-constant', f'{PDF_RESOLUTION}={HIGH_RESOLUTION}', '-constant', f'{OCR_LANGUAGE}=eng', '--', src)
     for path in find_exported(out_dir):
         try:
             for sound in read_musicxml_root(path).iter('sound'):
@@ -104,8 +114,9 @@ def read_pdf_tempo(src, work_dir, sheet):
 def pdf_to_musicxml(pdf_path, work_dir, log=print):
     """
     Audiveris로 PDF 악보를 인식해서 MusicXML(.mxl)로 내보냅니다.
-    악장이 나뉘거나 중간 페이지가 빠지면 파일이 여러 개 나오므로 순서대로 정렬한 목록을 반환합니다.
-    반환: (MusicXML 경로 목록, 인식에 성공한 첫 페이지 번호)
+    쪽들을 몇 묶음으로 나눠 동시에 인식하므로 파일이 여러 개 나옵니다 (쪽 순서대로 정렬해서 반환).
+    반환: {'files': [(MusicXML 경로, Audiveris 프로젝트(.omr) 경로, 담긴 쪽 번호 목록 또는 None)],
+           'first_sheet': 인식에 성공한 첫 쪽 번호}
     """
     exe = find_audiveris()
     if exe is None:
@@ -118,62 +129,121 @@ def pdf_to_musicxml(pdf_path, work_dir, log=print):
     src = os.path.join(work_dir, 'score.pdf')
     shutil.copyfile(pdf_path, src)
     out_dir = os.path.join(work_dir, 'out')
-    os.makedirs(out_dir, exist_ok=True)
 
-    def run(*args):
-        return run_audiveris(exe, *args)
-
-    def exported():
-        return find_exported(out_dir)
-
-    switches = ['-constant', f'{OCR_LANGUAGE}={OCR_OFF}']
-    for switch in AUDIVERIS_SWITCHES:
-        switches += ['-constant', f'org.audiveris.omr.sheet.ProcessingSwitches.{switch}=true']
-    code, output = run('-transcribe', '-export', '-output', out_dir, *switches, '--', src)
-    found = exported()
-    first_sheet = 1
-
-    # 한 페이지라도 실패하면(오선이 없는 표지/가사 페이지, Audiveris 내부 오류 등) Audiveris는
-    # 전체를 실패로 처리하고 아무것도 내보내지 않음. 인식 결과는 프로젝트(.omr)에 남아 있으므로
-    # 실패한 페이지를 빼고 다시 내보냄
-    book = os.path.join(out_dir, 'score.omr')
-    if not found and os.path.isfile(book):
-        total = re.search(r'(\d+) sheets? in ', output)
-        failed = {int(n) for n in re.findall(
-            r'\[score#(\d+)\][^\n]*(?:Error processing stub|flagged as invalid)', output)}
-        good = [n for n in range(1, int(total.group(1)) + 1) if n not in failed] if total else []
-        first_sheet = good[0] if good else 1
-        # 빠진 페이지를 사이에 두면 Audiveris가 악보를 둘로 나눠 같은 파일 이름에 덮어쓰므로
-        # 연속된 페이지 묶음마다 따로 내보냄
-        runs = []
-        for n in good:
-            if runs and runs[-1][-1] == n - 1:
-                runs[-1].append(n)
-            else:
-                runs.append([n])
-        for k, sheets in enumerate(runs):
-            code, retry_output = run('-export', '-sheets', *map(str, sheets), *switches, '--', book)
-            output += retry_output
-            # 프로젝트에서 내보낼 때는 -output 을 무시하고 항상 프로젝트 옆에 저장하므로 직접 옮김
-            run_dir = os.path.join(out_dir, f'run{k:02d}')
-            os.makedirs(run_dir, exist_ok=True)
-            for path in exported():
-                if os.path.dirname(path) == out_dir:
-                    os.replace(path, os.path.join(run_dir, os.path.basename(path)))
-        found = exported()
-        if found and failed:
-            log(f"   ⚠️ 인식하지 못해 건너뛴 페이지: {', '.join(map(str, sorted(failed)))}")
-
-    if not found:
+    def fail(code, output):
         if 'InvalidPasswordException' in output:
             raise RuntimeError("비밀번호가 걸린 PDF입니다. 비밀번호를 푼 PDF로 다시 시도해 주세요.")
         # 원인이 담긴 경고 줄만 추려서 보여줌 (자바 오류 추적 줄은 제외)
         warnings = [line.strip() for line in output.splitlines() if ' WARN ' in line and 'No installed OCR' not in line]
         detail = '\n'.join(dict.fromkeys(w.split('|', 1)[-1].strip() for w in warnings))[-600:]
         raise RuntimeError(f"Audiveris가 악보를 인식하지 못했습니다 (종료 코드 {code}).\n{detail}")
-    # run02/score.mvt2.mxl < run02/score.mvt10.mxl < run10/... 순서가 되도록 숫자 기준 정렬
-    found.sort(key=lambda p: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', os.path.relpath(p, out_dir))])
-    return found, first_sheet
+
+    def failed_sheets(text, reason):
+        return {int(n) for n in re.findall(r'\[score#(\d+)\][^\n]*' + reason, text)}
+
+    options = ['-constant', f'{OCR_LANGUAGE}={OCR_OFF}']
+    for switch in AUDIVERIS_SWITCHES:
+        options += ['-constant', f'org.audiveris.omr.sheet.ProcessingSwitches.{switch}=true']
+
+    # 쪽 수 알아내기: 첫 쪽만 불러오게 하면 전체 쪽 수가 바로 출력됨
+    code, output = run_audiveris(exe, '-step', 'LOAD', '-sheets', '1', '-output', os.path.join(work_dir, 'probe'), '--', src)
+    total = re.search(r'(\d+) sheets? in ', output)
+    if not total:
+        fail(code, output)
+    total = int(total.group(1))
+
+    def transcribe(workers, high_resolution):
+        """쪽을 workers 묶음으로 나눠 동시에 인식. 반환: [(쪽 번호 목록, 출력 폴더, Audiveris 출력)]"""
+        shutil.rmtree(out_dir, ignore_errors=True)
+        size = -(-total // workers)
+        chunks = [list(range(first, min(first + size, total + 1))) for first in range(1, total + 1, size)]
+        extra = ['-constant', f'{PDF_RESOLUTION}={HIGH_RESOLUTION}'] if high_resolution else []
+
+        def one(job):
+            k, sheets = job
+            folder = os.path.join(out_dir, f'part{k:02d}')
+            os.makedirs(folder)
+            _, text = run_audiveris(exe, '-transcribe', '-export', '-output', folder,
+                                    '-sheets', f'{sheets[0]}-{sheets[-1]}', *options, *extra, '--', src)
+            return sheets, folder, text
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+            return list(pool.map(one, enumerate(chunks)))
+
+    workers = max(1, min(MAX_WORKERS, (os.cpu_count() or 2) // 2, total))
+    jobs = transcribe(workers, True)
+    high_resolution_used = True
+    if any('Too large image' in text for _, _, text in jobs):
+        log("   쪽이 커서 고해상도로 읽을 수 없습니다. 기본 해상도로 다시 인식합니다...")
+        jobs = transcribe(workers, False)
+        high_resolution_used = False
+    elif any('OutOfMemoryError' in text for _, _, text in jobs) and workers > 1:
+        log("   메모리가 부족해서 한 쪽씩 다시 인식합니다. 시간이 더 걸립니다...")
+        jobs = transcribe(1, True)
+
+    # 고해상도에서 Audiveris 내부 오류로 실패한 쪽은 기본 해상도로 한 번 더 읽어 봄
+    # (해상도에 따라 오류가 나는 쪽이 다름. 오선이 없는 쪽(표지, 가사)은 다시 읽어도 소용없으므로 제외)
+    if high_resolution_used:
+        errored = set()
+        for sheets, _, text in jobs:
+            errored |= (failed_sheets(text, 'Error processing stub') - failed_sheets(text, 'flagged as invalid')) & set(sheets)
+        for n in sorted(errored):
+            folder = os.path.join(out_dir, f'retry{n:03d}')
+            os.makedirs(folder)
+            _, text = run_audiveris(exe, '-transcribe', '-export', '-output', folder, '-sheets', str(n), *options, '--', src)
+            jobs.append(([n], folder, text))
+        # 다시 읽은 쪽이 성공했으면 원래 묶음에서는 그 쪽이 빠진 채로 내보내지므로 쪽 순서대로 다시 정렬됨
+
+    files = []
+    failed = set()
+    recovered = set()
+    for sheets, folder, text in jobs:
+        book = os.path.join(folder, 'score.omr')
+        # 오선이 없는 쪽(표지, 가사)이나 Audiveris 내부 오류로 실패한 쪽
+        bad = (failed_sheets(text, 'flagged as invalid') | failed_sheets(text, 'Error processing stub')) & set(sheets)
+        if os.path.basename(folder).startswith('retry') and not bad:
+            recovered |= set(sheets)
+        failed |= bad
+        good = [n for n in sheets if n not in bad]
+        found = find_exported(folder)
+        if found:
+            groups = [good] if len(found) == 1 else [None] * len(found)
+        elif good and os.path.isfile(book):
+            # 한 쪽이라도 실패하면 Audiveris는 그 묶음 전체를 실패로 처리하고 아무것도 내보내지 않음.
+            # 인식 결과는 프로젝트(.omr)에 남아 있으므로 실패한 쪽을 빼고 내보냄.
+            # 빠진 쪽을 사이에 두면 악보를 둘로 나눠 같은 파일 이름에 덮어쓰므로, 연속된 쪽끼리 따로 내보냄
+            runs = []
+            for n in good:
+                if runs and runs[-1][-1] == n - 1:
+                    runs[-1].append(n)
+                else:
+                    runs.append([n])
+            groups = []
+            for k, run in enumerate(runs):
+                run_audiveris(exe, '-export', '-sheets', *map(str, run), *options, '--', book)
+                # 프로젝트에서 내보낼 때는 -output 을 무시하고 항상 프로젝트 옆에 저장하므로 직접 옮김
+                run_dir = os.path.join(folder, f'run{k:02d}')
+                os.makedirs(run_dir, exist_ok=True)
+                moved = [path for path in find_exported(folder) if os.path.dirname(path) == folder]
+                for path in moved:
+                    os.replace(path, os.path.join(run_dir, os.path.basename(path)))
+                groups += [run] if len(moved) == 1 else [None] * len(moved)
+            found = find_exported(folder)
+            if len(groups) != len(found):
+                groups = [None] * len(found)
+        # run02/score.mvt2.mxl < run02/score.mvt10.mxl < run10/... 순서가 되도록 숫자 기준 정렬
+        found.sort(key=lambda path: [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', os.path.relpath(path, folder))])
+        files += [(path, book, group) for path, group in zip(found, groups)]
+
+    if not files:
+        fail(1, '\n'.join(text for _, _, text in jobs))
+    failed -= recovered
+    # 쪽 순서대로 (쪽 목록을 모르는 파일은 원래 자리 유지)
+    files.sort(key=lambda item: item[2][0] if item[2] else 0)
+    if failed:
+        log(f"   ⚠️ 인식하지 못해 건너뛴 페이지: {', '.join(map(str, sorted(failed)))}")
+    good = [n for n in range(1, total + 1) if n not in failed]
+    return {'files': files, 'first_sheet': good[0] if good else 1}
 
 def read_musicxml_root(path):
     """MusicXML(.musicxml) 또는 압축 MusicXML(.mxl) 읽기"""
@@ -232,25 +302,33 @@ def drum_note_from_position(step, octave, notehead):
 
 def empty_measure(number=None):
     return {'number': number, 'notes': [], 'tempos': [], 'time': None, 'forward': False, 'backward': 0,
-            'ending_start': None, 'ending_stop': False, 'extent': Fraction(0), 'nominal': None}
+            'ending_start': None, 'ending_stop': False, 'extent': Fraction(0), 'nominal': None, 'simile': 0,
+            'ending_open': None,   # 페이지 데이터에서 읽은 괄호 시작 여부 (None = 정보 없음)
+            'xs': [],              # notes 와 짝을 이루는 음표의 가로 위치 (모르면 None)
+            'width': 0,            # 마디 너비 (가로 위치와 같은 단위)
+            'loose': None}         # 이 순번부터의 음표는 시간을 어림한 것 (가로 위치로 다시 정함)
 
 def align_measures(parsed):
     """
-    스캔 악보는 파트마다 마디가 몇 개씩 빠져 있을 수 있음. 순서대로만 맞추면 빠진 자리부터
-    그 파트가 통째로 한 마디씩 밀리므로, 마디 번호가 믿을 만하면 번호 기준으로 자리를 맞춤
+    스캔 악보는 파트마다 마디가 빠져 있거나 남는 마디가 끼어 있을 수 있음. 순서대로만 맞추면 그 자리부터
+    파트가 통째로 한 마디씩 밀리므로, 가장 많은 파트가 공유하는 마디 번호 순서를 기준으로 자리를 맞춤
     """
-    ref = max(parsed, key=lambda p: len(p['measures']))
-    numbers = [m['number'] for m in ref['measures']]
+    sequences = [tuple(m['number'] for m in p['measures']) for p in parsed]
+    numbers = collections.Counter(sequences).most_common(1)[0][0]
     index = {number: i for i, number in enumerate(numbers)}
     if None in index or len(index) != len(numbers):
         return
-    for p in parsed:
-        own = [m['number'] for m in p['measures']]
-        if len(own) == len(numbers) or len(set(own)) != len(own) or any(n not in index for n in own):
+    for p, own in zip(parsed, sequences):
+        if own == numbers:
             continue
         aligned = [empty_measure(number) for number in numbers]
         for m in p['measures']:
-            aligned[index[m['number']]] = m
+            # Audiveris는 2마디 반복 기호의 둘째 마디를 '9+1' 같은 번호의 남는 마디로 내보냄 -> 10번 마디 자리
+            extra = re.fullmatch(r'(\d+)\+(\d+)', m['number'] or '')
+            number = str(int(extra.group(1)) + int(extra.group(2))) if extra else m['number']
+            i = index.get(number)
+            if i is not None and (m['notes'] or not aligned[i]['notes']):
+                aligned[i] = m
         p['measures'] = aligned
 
 DIATONIC_STEPS = 'CDEFGAB'
@@ -271,6 +349,7 @@ def parse_part(part, drum_instruments, clef_drums=False):
     transpose = 0
     clefs = {}
     nominal = None
+    simile = 0   # 마디 반복 기호(% = 앞 1마디, 2마디 반복 기호 = 앞 2마디) 구간 안이면 반복하는 마디 수
     measures = []
     staff_numbers = {'1'}
     pitched = lyric_notes = 0
@@ -278,12 +357,16 @@ def parse_part(part, drum_instruments, clef_drums=False):
     for measure in part.findall('measure'):
         pos = extent = last_start = Fraction(0)
         m = empty_measure(measure.get('number'))
+        m['width'] = float(measure.get('width') or 0)
+        last_x = None
         for el in measure:
             if el.tag == 'attributes':
                 if el.findtext('divisions'):
                     divisions = int(el.findtext('divisions')) or 1
                 for clef in el.findall('clef'):
                     clefs[clef.get('number') or '1'] = clef.findtext('sign')
+                for mark in el.iter('measure-repeat'):
+                    simile = int(mark.get('slashes') or 1) if mark.get('type') == 'start' else 0
                 tr = el.find('transpose')
                 if tr is not None:
                     transpose = int(float(tr.findtext('chromatic') or 0)) + 12 * int(tr.findtext('octave-change') or 0)
@@ -325,6 +408,7 @@ def parse_part(part, drum_instruments, clef_drums=False):
                     start = last_start = pos
                     pos += dur
                     extent = max(extent, pos)
+                    last_x = float(el.get('default-x')) if el.get('default-x') else None
                 staff = el.findtext('staff') or '1'
                 staff_numbers.add(staff)
                 sign = clefs.get(staff, clefs.get('1'))
@@ -353,8 +437,10 @@ def parse_part(part, drum_instruments, clef_drums=False):
                     is_drum = True
                 ties = {t.get('type') for t in el.findall('tie')}
                 m['notes'].append((start, dur, max(0, min(127, note)), is_drum, 'start' in ties, 'stop' in ties))
+                m['xs'].append(last_x)
         m['extent'] = extent
         m['nominal'] = nominal
+        m['simile'] = simile
         measures.append(m)
 
     return {
@@ -475,7 +561,8 @@ def guess_scanned_roles(parts):
     keyless = [sh['single'] and max_keys >= 2 and sh['keys'] * 3 <= max_keys for sh in shapes]
 
     roles = {}
-    has_drum_staff = any(sh['clef'] == 'percussion' or sh['unpitched'] >= 10 for sh in shapes)
+    # 타악기 음자리표는 TAB의 글자를 잘못 읽어서 나오기도 하므로, 드럼 보표가 따로 있는지는 음표로 판단
+    has_drum_staff = any(sh['unpitched'] >= 10 for sh in shapes)
     # 베이스 = 조표가 있는 첫 번째 낮은음자리표 한 단 파트. 그 아래의 한 단 파트는 전부 드럼
     # (페이지마다 보표 수가 달라서 드럼이 두 파트로 갈라져 인식되기도 함)
     bass = next((i for i, sh in enumerate(shapes) if sh['single'] and sh['clef'] == 'F' and not keyless[i]), None)
@@ -490,7 +577,7 @@ def guess_scanned_roles(parts):
         roles[last] = 'drums'   # 베이스 보표 없이 드럼만 있는 악보
     # 베이스 위쪽의 조표 없는 한 단 보표 = 6줄 TAB을 잘못 읽은 것. 그 바로 위가 기타
     for idx in range(1, bass if bass is not None else len(parts)):
-        if keyless[idx] and idx not in roles and shapes[idx]['clef'] != 'percussion':
+        if keyless[idx] and idx not in roles and shapes[idx]['unpitched'] < 10:
             roles[idx] = 'tab'
             if shapes[idx - 1]['single'] and shapes[idx - 1]['clef'] == 'G' and idx - 1 not in roles:
                 roles[idx - 1] = 'guitar'
@@ -543,16 +630,110 @@ def join_files(files):
             part['measures'] += [empty_measure() for _ in range(done - len(part['measures']))]
     return joined
 
+def apply_pages(parsed, pages):
+    """
+    페이지 데이터에서 따로 읽은 마디별 정보(Convert_Pages.read_pages)를 적용합니다.
+    - 괄호가 시작하는 마디 표시
+    - X 음표(하이햇/심벌)를 드럼 파트에 추가
+    마디 수가 맞지 않으면 엉뚱한 마디에 들어가므로 적용하지 않고 False를 반환
+    """
+    if any(len(p['measures']) != len(pages) for p in parsed):
+        return False
+    for p in parsed:
+        for m, info in zip(p['measures'], pages):
+            m['ending_open'] = info['ending_open']
+    drums = next((p for p in parsed if p.get('role') == 'drums'), None) \
+        or next((p for p in parsed if any(note[3] for m in p['measures'] for note in m['notes'])), None)
+    if drums is not None:
+        cymbals = [info['cymbals'] for info in pages]
+        for i, m in enumerate(drums['measures']):
+            # 마디 반복 기호가 그려진 마디에는 X가 없으므로 반복되는 마디의 것을 가져옴
+            if m['simile'] and i >= m['simile']:
+                cymbals[i] = cymbals[i - m['simile']]
+            m['loose'] = len(m['notes'])
+            m['notes'] += [(at, Convert_Pages.X_NOTE_QUARTERS, note, True, False, False) for at, note, _ in cymbals[i]]
+            m['xs'] += [x for _, _, x in cymbals[i]]
+    return True
+
+# 같은 박으로 볼 가로 위치 차이 (오선 간격 = 10)
+POSITION_TOLERANCE = 6
+# 기준점 사이에 놓인 음표는 16분음표 단위로 맞춤
+RETIME_GRID = Fraction(1, 4)
+
+def retime_measure(measures, nominal):
+    """
+    스캔 악보의 리듬 교정 (한 마디, 모든 파트).
+
+    악보에서는 같은 박의 음표가 어느 파트에서나 같은 가로 위치에 놓입니다. 그래서 리듬이 맞게 읽힌
+    (마디 길이가 박자와 같은) 파트의 음표 위치를 기준점으로 삼아, 리듬이 잘못 읽힌 파트의 음표와
+    따로 찾은 X 음표가 언제 시작하는지를 가로 위치로 다시 정합니다.
+    """
+    votes = {}
+    leftmost = None
+    for m in measures:
+        loose = len(m['notes']) if m['loose'] is None else m['loose']
+        for k, (note, x) in enumerate(zip(m['notes'], m['xs'])):
+            if x is None:
+                continue
+            leftmost = x if leftmost is None else min(leftmost, x)
+            if m['extent'] == nominal and k < loose:
+                votes.setdefault(round(x), collections.Counter())[note[0]] += 1
+
+    # 가까운 위치끼리 묶어 기준점 [(가로 위치, 시간)]을 만들고, 시간이 뒤로 가는 점은 버림
+    groups = []
+    for x in sorted(votes):
+        if groups and x - groups[-1][0] <= POSITION_TOLERANCE:
+            groups[-1][1].update(votes[x])
+        else:
+            groups.append((x, collections.Counter(votes[x])))
+    points = []
+    for x, counter in groups:
+        at = counter.most_common(1)[0][0]
+        if not points or at > points[-1][1]:
+            points.append((x, at))
+    if len(points) < 2:
+        return
+    if points[0][1] > 0 and leftmost < points[0][0] - POSITION_TOLERANCE:
+        points.insert(0, (leftmost, Fraction(0)))   # 마디에서 가장 왼쪽 음표는 첫 박
+    width = max(m['width'] for m in measures)
+    if width > points[-1][0] + POSITION_TOLERANCE and nominal > points[-1][1]:
+        points.append((width, nominal))
+
+    def time_at(x):
+        near = min(points, key=lambda point: abs(point[0] - x))
+        if abs(near[0] - x) <= POSITION_TOLERANCE:
+            return near[1]
+        before = [point for point in points if point[0] <= x]
+        after = [point for point in points if point[0] > x]
+        if not before:
+            return points[0][1]
+        if not after:
+            return points[-1][1]
+        (x0, t0), (x1, t1) = before[-1], after[0]
+        at = t0 + (t1 - t0) * Fraction(int(x - x0), max(1, int(x1 - x0)))
+        return Fraction(round(at / RETIME_GRID)) * RETIME_GRID
+
+    for m in measures:
+        loose = len(m['notes']) if m['loose'] is None else m['loose']
+        for k, (note, x) in enumerate(zip(m['notes'], m['xs'])):
+            if x is not None and (m['extent'] != nominal or k >= loose):
+                m['notes'][k] = (time_at(x),) + tuple(note[1:])
+
 def load_musicxml(path):
     """MusicXML 한 파일 -> 파트별 음표 목록 (load_scores 참고)"""
     return load_scores([path])
 
-def load_scores(paths):
+def load_scores(paths, pages=None, log=print):
     """
     MusicXML 파일(들) -> 파트별 음표 목록 (시간은 4분음표 단위)
+    pages: 파일별 페이지 데이터 (Convert_Pages.read_pages 결과, 없으면 None)
     반환: {'parts': [{'name', 'program', 'notes': [[시작, 끝, 음, 드럼여부]]}], 'tempos', 'times', 'length'}
     """
     files = [parse_musicxml(path) for path in paths]
+    if pages:
+        applied = [apply_pages(parsed, extra) for (parsed, _), extra in zip(files, pages)]
+        if not all(applied):
+            log("   ⚠️ 마디 수가 맞지 않아 일부 구간에는 하이햇·심벌을 넣지 못했습니다.")
     return expand_score(join_files([parsed for parsed, _ in files]), any(scanned for _, scanned in files))
 
 def parse_musicxml(path):
@@ -591,6 +772,7 @@ def parse_musicxml(path):
         # 이름을 못 읽은 파트의 악기 번호는 Audiveris 기본값이라 의미 없음
         program = program if names[idx] or not from_audiveris else None
         p['name'], p['program'] = name_part(names[idx], program, p, roles.get(idx))
+        p['role'] = roles.get(idx)
         parsed.append(p)
 
     align_measures(parsed)
@@ -599,20 +781,24 @@ def parse_musicxml(path):
 def expand_score(parsed, from_audiveris):
     """마디 단위 파트 목록의 도돌이표를 풀어서 파트별 음표 목록으로 만듭니다."""
     n_measures = max(len(p['measures']) for p in parsed)
-    # 스캔 악보에서 박자표를 못 읽었으면 가장 흔한 마디 길이를 박자로 간주
+    # 스캔 악보에서 박자표를 한 번도 못 읽었으면 가장 흔한 마디 길이를 박자로 간주
     guessed = None
-    if from_audiveris and not any(m['nominal'] for p in parsed for m in p['measures']):
+    if from_audiveris:
         extents = collections.Counter(m['extent'] for p in parsed for m in p['measures'] if m['extent'])
         guessed = extents.most_common(1)[0][0] if extents else None
     lengths = []
     marks = []
+    current = None
     for i in range(n_measures):
         ms = [p['measures'][i] for p in parsed if i < len(p['measures'])]
         extent = max(m['extent'] for m in ms)
-        nominal = next((m['nominal'] for m in ms if m['nominal']), None) or guessed
+        # 박자표는 곡 첫머리에만 있는데 악보는 여러 파일로 나뉘어 인식되므로, 앞에서 읽은 박자를 이어서 씀
+        current = next((m['nominal'] for m in ms if m['nominal']), None) or current
+        nominal = current or guessed
         if from_audiveris and nominal and (i > 0 or extent >= nominal):
             # 스캔 악보는 리듬을 잘못 읽은 마디가 많아서, 못갖춘마디일 수 있는 첫 마디만 빼고 박자 길이로 고정
             lengths.append(nominal)
+            retime_measure(ms, nominal)
         else:
             # 마디 길이는 내용이 가장 긴 파트 기준 (못갖춘마디 대응).
             # 박자보다 길면 리듬을 잘못 읽은 것이므로 박자 길이로 맞춰서 다른 파트가 밀리지 않게 함
@@ -645,6 +831,20 @@ def expand_score(parsed, from_audiveris):
                 mark['backward'] = 0
             if mark['backward']:
                 opened = False
+
+    # 페이지 데이터에서 읽은 괄호 시작 표시가 있으면 MusicXML의 괄호 대신 사용.
+    # 번호는 글자 인식 없이는 알 수 없으므로 순서로 정함: 처음 열리는 괄호가 1번, 도돌이표 다음에 열리는 괄호가 2번
+    in_first = second_next = False
+    for i, mark in enumerate(marks):
+        opens = next((p['measures'][i]['ending_open'] for p in parsed
+                      if i < len(p['measures']) and p['measures'][i]['ending_open'] is not None), None)
+        if opens is not None:
+            mark['ending_start'], mark['ending_stop'] = None, False
+            if opens:
+                mark['ending_start'] = {2} if second_next else {1}
+                in_first, second_next = not second_next, False
+        if mark['backward'] and in_first:
+            in_first, second_next = False, True
 
     order = playback_order(marks)
     bases = []
@@ -753,9 +953,18 @@ def score_to_midi(path, log=print, fallback_bpm=None):
     if path.lower().endswith(MUSICXML_EXTS):
         return scores_to_midi([load_musicxml(path)], fallback_bpm, log)
     with tempfile.TemporaryDirectory(prefix='midivision_') as work_dir:
-        log("   PDF 악보 인식 중입니다 (Audiveris). 한 페이지에 20초쯤 걸립니다...")
-        xml_paths, first_sheet = pdf_to_musicxml(path, work_dir, log)
-        scores = [load_scores(xml_paths)]
+        log("   PDF 악보 인식 중입니다 (Audiveris). 20쪽에 7분쯤 걸립니다...")
+        result = pdf_to_musicxml(path, work_dir, log)
+        pages = None
+        if all(sheets for _, _, sheets in result['files']):
+            if Convert_Pages.can_find_cymbals():
+                log("   하이햇·심벌(X 모양 음표)을 찾는 중입니다...")
+            else:
+                log("   ⚠️ numpy / pillow 패키지가 없어 하이햇·심벌(X 모양 음표)은 읽지 못합니다. (pip install numpy pillow)")
+            pages = [Convert_Pages.read_pages(book, sheets, drum_note_from_position)
+                     for _, book, sheets in result['files']]
+        scores = [load_scores([path for path, _, _ in result['files']], pages, log)]
+        first_sheet = result['first_sheet']
         # 템포를 직접 적어 주지 않았으면 악보의 템포 표시를 읽어 봄
         if fallback_bpm is None and not any(score['tempos'] for score in scores) and ocr_data_installed():
             log("   템포 표시를 읽는 중입니다...")
