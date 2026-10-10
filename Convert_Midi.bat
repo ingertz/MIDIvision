@@ -4,10 +4,10 @@ set PY=python
 where python >nul 2>nul || set PY=py
 %PY% --version >nul 2>nul
 if errorlevel 1 goto nopython
-%PY% -c "import mido, customtkinter, tkinterdnd2, numpy, PIL" >nul 2>nul
+%PY% -c "import mido, customtkinter, tkinterdnd2, numpy, PIL, pypdf" >nul 2>nul
 if not errorlevel 1 goto run
 echo Installing required packages...
-%PY% -m pip install --upgrade mido customtkinter tkinterdnd2 numpy pillow
+%PY% -m pip install --upgrade mido customtkinter tkinterdnd2 numpy pillow pypdf
 if errorlevel 1 goto fail
 :run
 where %PY%w >nul 2>nul

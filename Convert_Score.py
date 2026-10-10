@@ -12,6 +12,7 @@ from fractions import Fraction
 from mido import MidiFile, MidiTrack, Message, MetaMessage, bpm2tempo
 
 import Convert_Pages
+import Convert_Vector
 
 # 악보 파일 -> MIDI 변환
 #   PDF 악보  --(Audiveris: 무료 악보 인식 프로그램)-->  MusicXML  -->  MIDI
@@ -953,21 +954,29 @@ def score_to_midi(path, log=print, fallback_bpm=None):
     if path.lower().endswith(MUSICXML_EXTS):
         return scores_to_midi([load_musicxml(path)], fallback_bpm, log)
     with tempfile.TemporaryDirectory(prefix='midivision_') as work_dir:
-        log("   PDF 악보 인식 중입니다 (Audiveris). 20쪽에 7분쯤 걸립니다...")
-        result = pdf_to_musicxml(path, work_dir, log)
-        pages = None
-        if all(sheets for _, _, sheets in result['files']):
-            if Convert_Pages.can_find_cymbals():
-                log("   하이햇·심벌(X 모양 음표)을 찾는 중입니다...")
-            else:
-                log("   ⚠️ numpy / pillow 패키지가 없어 하이햇·심벌(X 모양 음표)은 읽지 못합니다. (pip install numpy pillow)")
-            pages = [Convert_Pages.read_pages(book, sheets, drum_note_from_position)
-                     for _, book, sheets in result['files']]
-        scores = [load_scores([path for path, _, _ in result['files']], pages, log)]
-        first_sheet = result['first_sheet']
+        # 악보 프로그램에서 만든 PDF는 도형 데이터를 직접 읽음 (정확하고 몇 초면 끝남).
+        # 스캔본처럼 도형이 없는 PDF만 Audiveris로 그림을 인식
+        vector = Convert_Vector.read_pdf(path, log)
+        if vector:
+            parts, first_sheet = vector
+            scores = [expand_score(parts, True)]
+            shutil.copyfile(path, os.path.join(work_dir, 'score.pdf'))
+        else:
+            log("   도형으로 된 악보가 아니어서 그림으로 인식합니다 (Audiveris). 20쪽에 7분쯤 걸립니다...")
+            result = pdf_to_musicxml(path, work_dir, log)
+            pages = None
+            if all(sheets for _, _, sheets in result['files']):
+                if Convert_Pages.can_find_cymbals():
+                    log("   하이햇·심벌(X 모양 음표)을 찾는 중입니다...")
+                else:
+                    log("   ⚠️ numpy / pillow 패키지가 없어 하이햇·심벌(X 모양 음표)은 읽지 못합니다. (pip install numpy pillow)")
+                pages = [Convert_Pages.read_pages(book, sheets, drum_note_from_position)
+                         for _, book, sheets in result['files']]
+            scores = [load_scores([path for path, _, _ in result['files']], pages, log)]
+            first_sheet = result['first_sheet']
         # 템포를 직접 적어 주지 않았으면 악보의 템포 표시를 읽어 봄
-        if fallback_bpm is None and not any(score['tempos'] for score in scores) and ocr_data_installed():
-            log("   템포 표시를 읽는 중입니다...")
+        if fallback_bpm is None and not any(score['tempos'] for score in scores)                 and find_audiveris() and ocr_data_installed():
+            log("   템포 표시를 읽는 중입니다 (Audiveris, 40초쯤)...")
             bpm = read_pdf_tempo(os.path.join(work_dir, 'score.pdf'), work_dir, first_sheet)
             if bpm:
                 log(f"   악보의 템포 표시를 읽었습니다: {bpm:g} BPM")
