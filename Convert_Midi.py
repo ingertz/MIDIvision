@@ -826,11 +826,26 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
 
     return new_mid, total_notes_extracted, total_mapped
 
-def strip_known_suffixes(base_name):
-    """'곡 (Drum) (Guitar)' 처럼 이미 붙은 악기 접미사를 모두 제거"""
+def output_file_name(cfg, song_name, ext):
+    """결과 파일 이름: '(Drum)__곡명.mid' (밑줄 사이에 곡 번호를 끼워 넣을 수 있게 두 개)"""
+    return f"{cfg['suffix'].strip()}__{song_name}{ext}"
+
+# 결과 파일 이름 앞에 붙는 악기 표시: '(Drum)__곡명', '(Drum)_01_곡명', '(Drum)_곡명'
+PART_PREFIX = re.compile(
+    '^(?:' + '|'.join(re.escape(cfg['suffix'].strip()) for cfg in INSTRUMENT_CONFIG.values()) + r')_(?:\d+_|_)?')
+
+def strip_part_labels(base_name):
+    """
+    결과 파일 이름에서 악기 표시를 모두 제거하고 곡명만 남김
+    (앞에 붙는 '(Drum)__' / '(Drum)_01_' 과 예전 방식인 뒤에 붙는 ' (Drum)')
+    """
     changed = True
     while changed:
         changed = False
+        stripped = PART_PREFIX.sub('', base_name)
+        if stripped != base_name:
+            base_name = stripped
+            changed = True
         for cfg in INSTRUMENT_CONFIG.values():
             if base_name.endswith(cfg['suffix']):
                 base_name = base_name[:-len(cfg['suffix'])]
@@ -840,10 +855,7 @@ def strip_known_suffixes(base_name):
 def is_generated_file(path):
     """이 프로그램이 만든 결과 파일인지 (폴더 일괄 처리 시 재변환 방지용)"""
     base = os.path.splitext(os.path.basename(path))[0]
-    # '(Drum)_01_곡명' 처럼 악기를 앞으로 옮겨 이름을 바꾼 결과 파일도 포함
-    if any(base.startswith(cfg['suffix'].strip() + '_') for cfg in INSTRUMENT_CONFIG.values()):
-        return True
-    return strip_known_suffixes(base) != base
+    return strip_part_labels(base) != base
 
 def repair_smf_bytes(data):
     """
@@ -956,7 +968,7 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simp
         mid, repaired = load_midi(input_path)
         if repaired:
             print(f"⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다: {os.path.basename(input_path)}")
-    out_base = strip_known_suffixes(base_name)
+    out_base = strip_part_labels(base_name)
 
     results = []
     for inst_key in selected_keys:
@@ -967,7 +979,7 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simp
 
         # 노트가 1개 이상 추출된 경우에만 파일 저장
         if total_notes > 0:
-            output_path = os.path.join(dir_name, f"{out_base}{cfg['suffix']}{ext}")
+            output_path = os.path.join(dir_name, output_file_name(cfg, out_base, ext))
             # 원본 파일을 덮어쓰지 않음 (드럼 매핑이 이중으로 적용되는 것 방지)
             if os.path.normcase(os.path.abspath(output_path)) == os.path.normcase(os.path.abspath(input_path)):
                 print(f"[{cfg['name']}] 원본 파일과 저장 경로가 같아 건너뜁니다: {file_name}")
