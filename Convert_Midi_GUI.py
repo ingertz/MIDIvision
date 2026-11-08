@@ -37,7 +37,7 @@ try:
     from tkinter import filedialog, messagebox
     import customtkinter as ctk
     # 변환 로직은 Convert_Midi.py 한 곳에서만 관리 (GUI/CLI 결과가 달라지는 문제 방지)
-    from Convert_Midi import (INSTRUMENT_CONFIG, INPUT_EXTS, MIDI_EXTS, SCORE_EXTS,
+    from Convert_Midi import (INSTRUMENT_CONFIG, INPUT_EXTS, MIDI_EXTS, SCORE_EXTS, AUDIO_EXTS,
                               extract_selected_instruments, is_generated_file)
 except Exception:
     report_fatal_error(*sys.exc_info())
@@ -220,7 +220,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         self.drop_label = ctk.CTkLabel(
             self.drop_frame,
-            text="여기에 MIDI(.mid) 또는 악보(.pdf / .mxl) 파일을 끌어다 놓으세요 (드래그 & 드롭)",
+            text="여기에 MIDI(.mid), 악보(.pdf / .mxl), 음원(.mp3) 파일을 끌어다 놓으세요 (드래그 & 드롭)",
             font=ctk.CTkFont(family="Malgun Gothic", size=15, weight="bold"),
             text_color="#E2E8F0"
         )
@@ -436,7 +436,7 @@ class MidiConverterGUI(*_GUI_BASES):
                 midi_files.append(path)
 
         if not midi_files:
-            self.log("⚠️ 드롭된 항목 중 MIDI(.mid) / 악보(.pdf, .mxl) 파일을 찾을 수 없습니다.\n")
+            self.log("⚠️ 드롭된 항목 중 MIDI(.mid) / 악보(.pdf, .mxl) / 음원(.mp3) 파일을 찾을 수 없습니다.\n")
             return
 
         self.log(f"📥 드래그 앤 드롭으로 {len(midi_files)}개의 파일이 감지되었습니다.\n")
@@ -455,7 +455,7 @@ class MidiConverterGUI(*_GUI_BASES):
             for fn in filenames:
                 if not fn.lower().endswith(INPUT_EXTS) or is_generated_file(fn):
                     continue
-                if fn.lower().endswith(SCORE_EXTS) and os.path.splitext(fn)[0].lower() in midi_names:
+                if fn.lower().endswith(SCORE_EXTS + AUDIO_EXTS) and os.path.splitext(fn)[0].lower() in midi_names:
                     continue
                 midi_files.append(os.path.join(root, fn))
         return midi_files
@@ -463,8 +463,9 @@ class MidiConverterGUI(*_GUI_BASES):
     def select_files(self):
         files = filedialog.askopenfilenames(
             title="변환할 MIDI / 악보 파일들을 선택하세요",
-            filetypes=[("MIDI / 악보", "*.mid *.midi *.pdf *.mxl *.musicxml"), ("MIDI Files", "*.mid *.midi"),
-                       ("악보 (PDF / MusicXML)", "*.pdf *.mxl *.musicxml"), ("All Files", "*.*")]
+            filetypes=[("MIDI / 악보 / 음원", "*.mid *.midi *.pdf *.mxl *.musicxml " + " ".join("*" + e for e in AUDIO_EXTS)),
+                       ("MIDI Files", "*.mid *.midi"), ("악보 (PDF / MusicXML)", "*.pdf *.mxl *.musicxml"),
+                       ("음원", " ".join("*" + e for e in AUDIO_EXTS)), ("All Files", "*.*")]
         )
         if files:
             self.selected_files = list(files)

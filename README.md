@@ -20,6 +20,7 @@
 | `.mid` `.midi` | 가장 정확함 |
 | `.mxl` `.musicxml` | 악보 프로그램에서 내보낸 MusicXML |
 | `.pdf` | 악보 프로그램에서 만든 PDF는 바로 읽음. 스캔본은 [Audiveris](https://github.com/Audiveris/audiveris/releases) 설치 필요 |
+| `.mp3` `.wav` `.flac` `.ogg` `.m4a` `.aac` | 음원을 듣고 받아 적음. 가장 거칠고, 패키지를 따로 설치해야 함 (아래 "음원") |
 
 ## 파트 분류
 
@@ -105,12 +106,37 @@ MuseScore에서 내보낸 PDF는 음표 머리·쉼표·꼬리를 악보 글꼴(
 - 1번 괄호는 선이 짧게 그어져 있어도 다음 도돌이표까지 이어지는 것으로 봅니다.
 - 시작 도돌이표와 짝이 맞지 않는 도돌이표는 무시합니다.
 
+## 음원 (MP3 등)
+
+악보도 MIDI도 없는 곡을 위한 마지막 수단입니다. 결과는 악보·MIDI로 만든 것보다 훨씬 거칩니다.
+
+1. [Demucs](https://github.com/adefossez/demucs)로 곡을 드럼 / 베이스 / 기타 / 피아노 / 보컬 / 나머지로 나눕니다.
+2. 드럼은 타격 순간을 찾고, 순간마다 낮은음(킥) / 중간음과 스네어 줄 소리(스네어) / 높은음(하이햇)이
+   얼마나 커졌는지로 악기를 가립니다. 높은음이 크게 튀고 오래 울리면 크래시입니다.
+3. 나머지는 [Basic Pitch](https://github.com/spotify/basic-pitch)로 음높이와 길이를 읽습니다.
+   보컬과 "나머지"(신스·현악 등)는 건반 파트로 들어갑니다. 소리가 거의 없는 갈래는 건너뜁니다.
+4. 박을 찾아 모든 음을 16분음표 격자에 맞추고, 박 간격의 중앙값을 템포로 씁니다.
+
+- 베이스·보컬 멜로디는 쓸 만하고, 드럼은 킥·스네어·하이햇 위주이며 탐은 나오지 않습니다.
+  기타·피아노처럼 화음이 많은 악기는 틀린 음이 섞이고, 다른 악기 소리가 새어 들어 엉뚱한 음이 생깁니다.
+- 박자표는 늘 4/4로 적습니다. 템포가 크게 바뀌는 곡은 박을 잘못 찾을 수 있습니다.
+- 확장자만 .mp3이고 실제로는 MP4인 파일, 영상 파일(.mp4)의 소리도 읽습니다(PyAV). 영상 파일은 확장자를 .m4a로 바꿔 넣으면 됩니다.
+- CPU로 돌리면 3분짜리 곡에 몇 분 걸립니다. 처음 한 번은 Demucs 모델(약 80MB)을 내려받습니다.
+- 설치 (2~3GB, 처음 한 번). basic-pitch는 Python 3.12 이상에서 TensorFlow 때문에 그냥은 설치되지 않아서
+  의존성 없이 설치하고 ONNX로 돌립니다. 명령 프롬프트에서 두 줄을 차례로:
+
+  ```
+  pip install soundfile librosa demucs av onnxruntime mir_eval pretty_midi
+  pip install --no-deps basic-pitch resampy
+  ```
+
 ## 파일 구성
 
 - `Convert_Midi.py` — 악기 판별 / 분리 / 드럼 매핑 (명령줄로도 실행 가능, `--analyze 파일`로 트랙 판별 결과 확인)
 - `Convert_Score.py` — PDF / MusicXML → MIDI 변환
 - `Convert_Vector.py` — 도형으로 된 PDF에서 악보 직접 읽기
 - `Convert_Glyphs.py` — 악보 글꼴의 글자로 찍힌 PDF(MuseScore)의 글자를 기호로 바꾸기
+- `Convert_Audio.py` — 음원(MP3 등)을 악기별로 나눠 받아 적기
 - `Convert_Pages.py` — (스캔본용) Audiveris 페이지 데이터에서 X 음표와 괄호 위치 읽기
 - `Convert_Midi_GUI.py` — 화면
 - `Convert_Midi.bat` — 실행

@@ -5,8 +5,9 @@ import sys
 import os
 import re
 
-# 악보 파일(PDF / MusicXML)은 Convert_Score.py가 MIDI로 바꾼 뒤 같은 방식으로 분리
+# 악보 파일(PDF / MusicXML)은 Convert_Score.py, 음원(MP3 등)은 Convert_Audio.py가 MIDI로 바꾼 뒤 같은 방식으로 분리
 from Convert_Score import SCORE_EXTS, score_to_midi
+from Convert_Audio import AUDIO_EXTS
 
 # GM 드럼 노트 번호 -> 스타 레조넌스 건반 노트 번호 정밀 매핑 테이블
 # 인게임 건반:
@@ -948,12 +949,12 @@ def load_midi(input_path):
     return MidiFile(file=io.BytesIO(data)), True
 
 MIDI_EXTS = ('.mid', '.midi')
-INPUT_EXTS = MIDI_EXTS + SCORE_EXTS
+INPUT_EXTS = MIDI_EXTS + SCORE_EXTS + AUDIO_EXTS
 
 def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True, log=print, score_bpm=None):
     """
     밴드스코어에서 사용자가 선택한 악기 목록(drum, guitar, bass, keyboard)을 각각 추출하여 저장합니다.
-    MIDI 외에 PDF 악보 / MusicXML도 받습니다 (결과는 항상 .mid).
+    MIDI 외에 PDF 악보 / MusicXML / 음원(MP3 등)도 받습니다 (결과는 항상 .mid).
     score_bpm: 악보에서 템포를 읽지 못했을 때 쓸 템포
     """
     if not os.path.exists(input_path):
@@ -963,6 +964,10 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simp
     base_name, ext = os.path.splitext(file_name)
     if ext.lower() in SCORE_EXTS:
         mid = score_to_midi(input_path, log=log, fallback_bpm=score_bpm)
+        ext = '.mid'
+    elif ext.lower() in AUDIO_EXTS:
+        from Convert_Audio import audio_to_midi     # 무거운 패키지(PyTorch 등)는 음원을 넣을 때만 읽음
+        mid = audio_to_midi(input_path, log=log)
         ext = '.mid'
     else:
         mid, repaired = load_midi(input_path)
