@@ -37,8 +37,8 @@ try:
     from tkinter import filedialog, messagebox
     import customtkinter as ctk
     # 변환 로직은 Convert_Midi.py 한 곳에서만 관리 (GUI/CLI 결과가 달라지는 문제 방지)
-    from Convert_Midi import (INSTRUMENT_CONFIG, INPUT_EXTS, MIDI_EXTS, SCORE_EXTS, AUDIO_EXTS,
-                              extract_selected_instruments, is_generated_file)
+    from Convert_Midi import (INPUT_EXTS, MIDI_EXTS, SCORE_EXTS, AUDIO_EXTS,
+                              convert_file, is_generated_file)
 except Exception:
     report_fatal_error(*sys.exc_info())
     sys.exit(1)
@@ -72,9 +72,9 @@ class MidiConverterGUI(*_GUI_BASES):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.title("스타 레조넌스 밴드스코어 악기 분리 추출기")
-        self.geometry("780x820")
-        self.minsize(700, 650)
+        self.title("스타 레조넌스 합본 MIDI 변환기 (드럼 매핑)")
+        self.geometry("760x680")
+        self.minsize(680, 560)
 
         self.last_output_dir = None
         self.selected_files = []
@@ -94,112 +94,18 @@ class MidiConverterGUI(*_GUI_BASES):
 
         title_label = ctk.CTkLabel(
             header_frame, 
-            text="🎼 밴드스코어 악기 선택 추출기", 
+            text="🎼 스타 레조넌스 합본 MIDI 변환기", 
             font=ctk.CTkFont(family="Malgun Gothic", size=22, weight="bold")
         )
         title_label.pack(anchor="w")
 
         desc_label = ctk.CTkLabel(
             header_frame, 
-            text="밴드 MIDI / PDF 악보에서 원하는 파트를 선택 추출합니다. 드럼(음계 이동), 기타/베이스(원음 보존), 건반(보컬·색소폰·관현악 등 포함 원음 보존)",
+            text="원본 트랙·채널 구조는 그대로 유지하고, 드럼만 인게임 건반 음계로 변환하여 합본 MIDI(곡명_converted.mid)로 저장합니다.",
             font=ctk.CTkFont(family="Malgun Gothic", size=12),
             text_color="#9AA0A6"
         )
         desc_label.pack(anchor="w", pady=(2, 0))
-
-        # 악기 선택 체크박스 카드
-        inst_card = ctk.CTkFrame(self, fg_color="#181B20", corner_radius=12)
-        inst_card.pack(fill="x", padx=24, pady=6, ipady=4)
-
-        inst_top_row = ctk.CTkFrame(inst_card, fg_color="transparent")
-        inst_top_row.pack(fill="x", padx=16, pady=(8, 4))
-
-        card_title = ctk.CTkLabel(
-            inst_top_row,
-            text="🎯 추출할 악기 파트 선택 (다중 선택 가능)",
-            font=ctk.CTkFont(family="Malgun Gothic", size=13, weight="bold"),
-            text_color="#93C5FD"
-        )
-        card_title.pack(side="left")
-
-        btn_select_all = ctk.CTkButton(
-            inst_top_row,
-            text="전체 선택",
-            width=68,
-            height=24,
-            font=ctk.CTkFont(family="Malgun Gothic", size=11),
-            fg_color="#334155",
-            hover_color="#475569",
-            command=self.select_all_instruments
-        )
-        btn_select_all.pack(side="right", padx=(4, 0))
-
-        btn_clear_all = ctk.CTkButton(
-            inst_top_row,
-            text="선택 해제",
-            width=68,
-            height=24,
-            font=ctk.CTkFont(family="Malgun Gothic", size=11),
-            fg_color="#334155",
-            hover_color="#475569",
-            command=self.clear_all_instruments
-        )
-        btn_clear_all.pack(side="right")
-
-        # 체크박스 4개 (드럼, 기타, 베이스, 건반)
-        check_row = ctk.CTkFrame(inst_card, fg_color="transparent")
-        check_row.pack(fill="x", padx=16, pady=(4, 8))
-
-        self.inst_vars = {
-            'drum': tk.BooleanVar(value=True),
-            'guitar': tk.BooleanVar(value=True),
-            'bass': tk.BooleanVar(value=True),
-            'keyboard': tk.BooleanVar(value=True),
-        }
-
-        self.chk_drum = ctk.CTkCheckBox(
-            check_row,
-            text="🥁 드럼 (Drum)\n   └ 음계이동 적용",
-            variable=self.inst_vars['drum'],
-            font=ctk.CTkFont(family="Malgun Gothic", size=12, weight="bold"),
-            text_color="#F8FAFC",
-            checkmark_color="#FFFFFF",
-            fg_color="#2563EB"
-        )
-        self.chk_drum.pack(side="left", expand=True, anchor="w", padx=4)
-
-        self.chk_guitar = ctk.CTkCheckBox(
-            check_row,
-            text="🎸 기타 (Guitar)\n   └ 원음 보존",
-            variable=self.inst_vars['guitar'],
-            font=ctk.CTkFont(family="Malgun Gothic", size=12, weight="bold"),
-            text_color="#F8FAFC",
-            checkmark_color="#FFFFFF",
-            fg_color="#10B981"
-        )
-        self.chk_guitar.pack(side="left", expand=True, anchor="w", padx=4)
-
-        self.chk_bass = ctk.CTkCheckBox(
-            check_row,
-            text="🎸 베이스 (Bass)\n   └ 원음 보존",
-            variable=self.inst_vars['bass'],
-            font=ctk.CTkFont(family="Malgun Gothic", size=12, weight="bold"),
-            text_color="#F8FAFC",
-            checkmark_color="#FFFFFF",
-            fg_color="#8B5CF6"
-        )
-        self.chk_bass.pack(side="left", expand=True, anchor="w", padx=4)
-
-        self.chk_keyboard = ctk.CTkCheckBox(
-            check_row,
-            text="🎹 건반 (Keyboard)\n   └ 보컬·관현악 전악기",
-            variable=self.inst_vars['keyboard'],
-            font=ctk.CTkFont(family="Malgun Gothic", size=12, weight="bold"),
-            text_color="#F8FAFC",
-            checkmark_color="#FFFFFF",
-            fg_color="#F59E0B"
-        )
-        self.chk_keyboard.pack(side="left", expand=True, anchor="w", padx=4)
 
         # 드래그 앤 드롭 영역
         self.drop_frame = ctk.CTkFrame(
@@ -209,7 +115,7 @@ class MidiConverterGUI(*_GUI_BASES):
             border_width=2, 
             corner_radius=14
         )
-        self.drop_frame.pack(fill="x", padx=24, pady=6, ipady=8)
+        self.drop_frame.pack(fill="x", padx=24, pady=8, ipady=10)
 
         drop_icon = ctk.CTkLabel(
             self.drop_frame, 
@@ -255,30 +161,10 @@ class MidiConverterGUI(*_GUI_BASES):
 
         # 건반 매핑 및 옵션 안내 카드
         info_frame = ctk.CTkFrame(self, fg_color="#181B20", corner_radius=10)
-        info_frame.pack(fill="x", padx=24, pady=4, ipady=2)
-
-        self.chk_force_ch0 = ctk.CTkCheckBox(
-            info_frame,
-            text="인게임 악기 인식을 위해 채널을 0(Channel 1)으로 통일 (필수 권장)",
-            font=ctk.CTkFont(family="Malgun Gothic", size=11),
-            onvalue=True,
-            offvalue=False
-        )
-        self.chk_force_ch0.select()
-        self.chk_force_ch0.pack(anchor="w", padx=14, pady=(6, 3))
-
-        self.chk_simplify = ctk.CTkCheckBox(
-            info_frame,
-            text="화음/트랙 간소화 (패드·효과음 제거, 동시 음 수 제한: 건반 3 / 기타 3 / 베이스 1, 멜로디 보존)",
-            font=ctk.CTkFont(family="Malgun Gothic", size=11),
-            onvalue=True,
-            offvalue=False
-        )
-        self.chk_simplify.select()
-        self.chk_simplify.pack(anchor="w", padx=14, pady=(0, 3))
+        info_frame.pack(fill="x", padx=24, pady=4, ipady=4)
 
         bpm_row = ctk.CTkFrame(info_frame, fg_color="transparent")
-        bpm_row.pack(anchor="w", padx=14, pady=(0, 4))
+        bpm_row.pack(anchor="w", padx=14, pady=(8, 4))
         ctk.CTkLabel(
             bpm_row,
             text="악보(PDF) 템포 BPM:",
@@ -298,11 +184,11 @@ class MidiConverterGUI(*_GUI_BASES):
 
         mapping_title = ctk.CTkLabel(
             info_frame,
-            text="🎹 스타 레조넌스 드럼 음계 이동 키 매핑 (드럼만 적용됨)",
+            text="🥁 스타 레조넌스 드럼 음계 이동 키 매핑 (드럼 트랙·채널만 자동 적용, 나머지 악기는 원음·채널 유지)",
             font=ctk.CTkFont(family="Malgun Gothic", size=11, weight="bold"),
             text_color="#93C5FD"
         )
-        mapping_title.pack(anchor="w", padx=14, pady=(0, 1))
+        mapping_title.pack(anchor="w", padx=14, pady=(2, 1))
 
         mapping_text = (
             "• 킥: F4 [ F ]    • 스네어: C5 [ Q ]    • 하이햇: D4 [ S ], 오픈: G5 [ T ]\n"
@@ -324,7 +210,7 @@ class MidiConverterGUI(*_GUI_BASES):
 
         self.btn_convert_now = ctk.CTkButton(
             action_bar,
-            text="⚡ 선택한 악기 추출 실행",
+            text="⚡ 드럼 변환 및 합본 MIDI 생성",
             font=ctk.CTkFont(family="Malgun Gothic", size=13, weight="bold"),
             fg_color="#10B981",
             hover_color="#059669",
@@ -372,18 +258,9 @@ class MidiConverterGUI(*_GUI_BASES):
         self.log_box.pack(fill="both", expand=True, padx=24, pady=(4, 16))
 
         self.log("✅ 프로그램이 준비되었습니다.\n")
-        self.log("💡 상단에서 추출할 악기(드럼/기타/베이스/건반)를 체크한 뒤 MIDI 파일을 드래그하세요.\n")
-        self.log("   * PDF 악보도 가능 (무료 프로그램 Audiveris 설치 필요, 악보 상태에 따라 인식이 부정확할 수 있음)\n")
+        self.log("💡 MIDI / 악보 / 음원 파일을 드래그하면 드럼만 인게임용으로 수정된 합본 MIDI(곡명_converted.mid)를 생성합니다.\n")
         self.log("   * 드럼: 스타 레조넌스 인게임 건반 노트로 자동 이동\n")
-        self.log("   * 기타/베이스/건반: 원본 음계 그대로 보존\n" + "-"*68 + "\n")
-
-    def select_all_instruments(self):
-        for v in self.inst_vars.values():
-            v.set(True)
-
-    def clear_all_instruments(self):
-        for v in self.inst_vars.values():
-            v.set(False)
+        self.log("   * 기타/베이스/건반 등: 원본 트랙·채널·음계 그대로 보존\n" + "-"*68 + "\n")
 
     def setup_dnd(self):
         if self.dnd_ready:
@@ -409,9 +286,6 @@ class MidiConverterGUI(*_GUI_BASES):
         except queue.Empty:
             pass
         self.after(50, self._drain_ui_queue)
-
-    def get_selected_keys(self):
-        return [k for k, v in self.inst_vars.items() if v.get()]
 
     def on_drop(self, files):
         decoded_files = []
@@ -446,7 +320,7 @@ class MidiConverterGUI(*_GUI_BASES):
     @staticmethod
     def find_midi_files(folder):
         """
-        폴더 내 MIDI / 악보 파일 검색 (이전에 생성된 '(Drum)' 등 결과 파일은 재변환하지 않도록 제외)
+        폴더 내 MIDI / 악보 파일 검색 (이전에 생성된 '_converted' 등 결과 파일은 재변환하지 않도록 제외)
         같은 이름의 MIDI가 있는 악보는 제외 (둘 다 변환하면 결과 파일이 서로 덮어씀)
         """
         midi_files = []
@@ -491,22 +365,16 @@ class MidiConverterGUI(*_GUI_BASES):
 
     def start_conversion_thread(self, file_list):
         if self.is_running:
-            self.log("⚠️ 이전 추출 작업이 아직 진행 중입니다. 완료 후 다시 시도해주세요.\n")
-            return
-        selected_keys = self.get_selected_keys()
-        if not selected_keys:
-            messagebox.showwarning("악기 미선택", "추출할 악기를 하나 이상 선택해주세요 (드럼, 기타, 베이스, 건반).")
+            self.log("⚠️ 이전 변환 작업이 아직 진행 중입니다. 완료 후 다시 시도해주세요.\n")
             return
 
         # Tk 위젯은 메인 스레드에서만 접근해야 하므로 작업 스레드 시작 전에 값을 읽고 버튼 상태를 바꿈
-        force_ch0 = bool(self.chk_force_ch0.get())
-        simplify = bool(self.chk_simplify.get())
         score_bpm = self.get_score_bpm()
         self.is_running = True
-        self.btn_convert_now.configure(state="disabled", text="⏳ 추출 작업 중...")
+        self.btn_convert_now.configure(state="disabled", text="⏳ 변환 작업 중...")
         self.btn_select_files.configure(state="disabled")
         self.btn_select_folder.configure(state="disabled")
-        threading.Thread(target=self.process_files, args=(list(file_list), selected_keys, force_ch0, simplify, score_bpm), daemon=True).start()
+        threading.Thread(target=self.process_files, args=(list(file_list), score_bpm), daemon=True).start()
 
     def get_score_bpm(self):
         """템포 칸에 적힌 BPM (비었거나 잘못된 값이면 None)"""
@@ -522,43 +390,37 @@ class MidiConverterGUI(*_GUI_BASES):
             return None
         return bpm
 
-    def process_files(self, file_list, selected_keys, force_ch0, simplify, score_bpm):
+    def process_files(self, file_list, score_bpm):
         try:
-            self._process_files(file_list, selected_keys, force_ch0, simplify, score_bpm)
+            self._process_files(file_list, score_bpm)
         except Exception as e:
             self.log(f"❌ 예기치 못한 오류: {e}\n")
         finally:
             self.call_in_main(self.on_conversion_finished)
 
-    def _process_files(self, file_list, selected_keys, force_ch0, simplify, score_bpm):
-        names = [INSTRUMENT_CONFIG[k]['name'] for k in selected_keys]
-        self.log(f"🚀 작업 시작: 선택된 악기 파트 [{', '.join(names)}]\n")
+    def _process_files(self, file_list, score_bpm):
+        self.log("🚀 합본 MIDI 변환 작업 시작 (드럼 인게임 음계 매핑)\n")
 
-        total_extracted_files = 0
+        total_converted_files = 0
         last_dir = None
 
         for idx, file_path in enumerate(file_list, 1):
             file_name = os.path.basename(file_path)
-            self.log(f"[{idx}/{len(file_list)}] 분석 및 추출 중: {file_name}\n")
+            self.log(f"[{idx}/{len(file_list)}] 변환 중: {file_name}\n")
 
             try:
-                results = extract_selected_instruments(file_path, selected_keys, force_ch0=force_ch0, simplify=simplify,
-                                                       log=lambda text: self.log(text + "\n"), score_bpm=score_bpm)
-                if results:
-                    for res in results:
-                        total_extracted_files += 1
-                        last_dir = os.path.dirname(res['path'])
-                        out_fn = os.path.basename(res['path'])
-                        if res['is_drum']:
-                            self.log(f" ➔ [{res['name']}] 추출 완료: {out_fn} (음표: {res['total_notes']}개, 건반매핑: {res['mapped_notes']}개)\n")
-                        else:
-                            self.log(f" ➔ [{res['name']}] 추출 완료: {out_fn} (음표: {res['total_notes']}개, 원음 보존)\n")
+                res = convert_file(file_path, log=lambda text: self.log(text + "\n"), score_bpm=score_bpm)
+                if res:
+                    total_converted_files += 1
+                    last_dir = os.path.dirname(res['path'])
+                    out_fn = os.path.basename(res['path'])
+                    self.log(f" ➔ 합본 생성 완료: {out_fn} (전체 음표: {res['total_notes']}개, 드럼 매핑: {res['mapped_notes']}개)\n")
                 else:
-                    self.log(" ⚠️ 선택된 악기의 트랙이나 음표를 찾지 못했습니다.\n")
+                    self.log(" ⚠️ 변환할 음표를 찾지 못했거나 원본 파일과 경로가 같아 건너뛰었습니다.\n")
             except Exception as e:
                 self.log(f" ➔ 오류 발생: {e}\n")
 
-        self.log(f"✨ 전체 작업 완료! 총 {total_extracted_files}개의 악기별 분리 파일이 생성되었습니다.\n")
+        self.log(f"✨ 전체 작업 완료! 총 {total_converted_files}개의 합본 MIDI 파일이 생성되었습니다.\n")
         self.log("="*68 + "\n")
 
         if last_dir and os.path.exists(last_dir):
@@ -568,7 +430,7 @@ class MidiConverterGUI(*_GUI_BASES):
         self.is_running = False
         if self.last_output_dir:
             self.btn_open_folder.configure(state="normal")
-        self.btn_convert_now.configure(state="normal", text="⚡ 선택한 악기 추출 실행")
+        self.btn_convert_now.configure(state="normal", text="⚡ 드럼 변환 및 합본 MIDI 생성")
         self.btn_select_files.configure(state="normal")
         self.btn_select_folder.configure(state="normal")
 

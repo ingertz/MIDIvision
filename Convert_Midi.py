@@ -5,7 +5,7 @@ import sys
 import os
 import re
 
-# 악보 파일(PDF / MusicXML)은 Convert_Score.py, 음원(MP3 등)은 Convert_Audio.py가 MIDI로 바꾼 뒤 같은 방식으로 분리
+# 악보 파일(PDF / MusicXML)은 Convert_Score.py, 음원(MP3 등)은 Convert_Audio.py가 MIDI로 바꾼 뒤 드럼 매핑 처리
 from Convert_Score import SCORE_EXTS, score_to_midi
 from Convert_Audio import AUDIO_EXTS
 
@@ -79,6 +79,8 @@ SKIP_DRUM_NOTES = {
     82,  # Shaker
 }
 
+DRUM_KEYWORDS = ['drum', 'drums', 'perc', 'percussion', '드럼', '타악기', 'battery', 'kit', 'cymb', 'ドラム', 'パーカッション', '打楽器']
+
 def get_mapped_drum_note(note):
     """
     GM 드럼 음표 -> 인게임 키. 타악기 범위(27~87) 밖의 음표는 None을 반환하여 버립니다.
@@ -88,46 +90,6 @@ def get_mapped_drum_note(note):
     if note not in DRUM_NOTE_RANGE or note in SKIP_DRUM_NOTES:
         return None
     return DRUM_MAP[note]
-
-# 보컬(멜로디) 트랙 이름 키워드: 악기 번호가 기타/베이스여도 무조건 건반으로 보냄
-VOCAL_KEYWORDS = ['vocal', 'vocals', 'vo', 'vox', 'voice', 'melody', 'singer', 'lead vocal', 'chorus',
-                  '보컬', '노래', '멜로디', '코러스', 'ボーカル', '歌', 'メロディ', 'コーラス', '人声', '主唱', '旋律', '和声']
-
-# 악기별 판별 설정 (기타, 베이스, 건반, 드럼)
-INSTRUMENT_CONFIG = {
-    'drum': {
-        'name': '드럼',
-        'suffix': ' (Drum)',
-        'remap_drums': True,  # 드럼은 스타 레조넌스 음계 이동(매핑) 유지!
-        'keywords': ['drum', 'drums', 'perc', 'percussion', '드럼', '타악기', 'battery', 'kit', 'cymb', 'ドラム', 'パーカッション', '打楽器'],
-        'channel_match': lambda ch: ch == 9,
-        'program_match': lambda p: False,
-    },
-    'guitar': {
-        'name': '기타',
-        'suffix': ' (Guitar)',
-        'remap_drums': False,  # 멜로디 악기는 원음 유지
-        'keywords': ['guitar', 'gt', 'guit', 'eg', 'ag', 'clean', 'dist', 'overdrive', 'lead gt', 'ac gt', 'el gt', '기타', 'ギター'],
-        'channel_match': lambda ch: ch != 9,
-        'program_match': lambda p: 24 <= p <= 31,
-    },
-    'bass': {
-        'name': '베이스',
-        'suffix': ' (Bass)',
-        'remap_drums': False,  # 멜로디 악기는 원음 유지
-        'keywords': ['bass', 'eb', 'slap', 'pick bass', 'fingered bass', 'ac bass', 'el bass', '베이스', 'ベース'],
-        'channel_match': lambda ch: ch != 9,
-        'program_match': lambda p: 32 <= p <= 39,
-    },
-    'keyboard': {
-        'name': '건반',
-        'suffix': ' (Keyboard)',
-        'remap_drums': False,  # 멜로디 악기는 원음 유지
-        'keywords': ['piano', 'key', 'keyboard', 'synth', 'organ', 'clav', 'rhodes', 'harpsichord', '피아노', '건반', '신스', 'ピアノ', 'オルガン', 'シンセ', 'キーボード'],
-        'channel_match': lambda ch: ch != 9,
-        'program_match': lambda p: (0 <= p <= 23) or (80 <= p <= 103),
-    }
-}
 
 def match_keyword(name, keywords):
     """
@@ -147,22 +109,11 @@ def match_keyword(name, keywords):
                 return True
     return False
 
-# 모든 트랙에 공통으로 적용되어야 하는 메타 메시지 (템포/박자/조성)
-CONDUCTOR_META_TYPES = ('set_tempo', 'time_signature', 'key_signature')
-
 def is_note_on(msg):
     return msg.type == 'note_on' and msg.velocity > 0
 
 def is_note_off(msg):
     return msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0)
-
-def classify_program(program):
-    """GM 프로그램 번호 -> 악기 키"""
-    if 32 <= program <= 39:
-        return 'bass'
-    if 24 <= program <= 31:
-        return 'guitar'
-    return 'keyboard'
 
 def decode_text(text):
     """
@@ -183,10 +134,6 @@ def decode_text(text):
 # 뱅크 셀렉트(CC0) 값이 이 값이면 야마하 XG 드럼 킷 (채널 10이 아니어도 드럼)
 XG_DRUM_BANKS = (126, 127)
 
-# 베이스 악기 번호라도 중간 음이 이보다 높으면 베이스가 아님 (G3 = 55)
-# 예: Pretender는 채널 7이 Synth Bass 2(39)인데 실제로는 32~89 음역 화음을 치는 신스
-BASS_MAX_MEDIAN_NOTE = 55
-
 def track_drum_channels(track):
     """드럼 채널 집합: 채널 10(인덱스 9) + XG 드럼 뱅크(127/126)가 선택된 채널"""
     drum = {9}
@@ -194,14 +141,6 @@ def track_drum_channels(track):
         if msg.type == 'control_change' and msg.control == 0 and msg.value in XG_DRUM_BANKS:
             drum.add(msg.channel)
     return drum
-
-def channel_median_notes(track):
-    """채널별 음 높이 중간값"""
-    notes = {}
-    for msg in track:
-        if is_note_on(msg):
-            notes.setdefault(msg.channel, []).append(msg.note)
-    return {ch: sorted(ns)[len(ns) // 2] for ch, ns in notes.items()}
 
 def file_has_drum_channel(mid):
     """파일 어딘가에 드럼 채널(채널 10 또는 XG 드럼 킷) 음표가 있는지"""
@@ -211,26 +150,16 @@ def file_has_drum_channel(mid):
             return True
     return False
 
-def analyze_track_instrument(track, drum_by_name=True):
-    """
-    트랙의 이름, 프로그램 번호, 채널, 음표 정보를 기반으로 악기 판별:
-    - 드럼: 채널 9 또는 드럼 키워드 (drum_by_name=False이면 채널 9만 인정)
-    - 베이스: 베이스 키워드, 또는 베이스 프로그램(32~39)이면서 중간 음이 G3 이하
-    - 기타: 기타 프로그램(24~31) 또는 기타 키워드
-    - 보컬: 트랙 이름이 보컬이면 악기 번호와 상관없이 건반
-    - 건반: 위를 제외한 모든 악기(피아노, 색소폰, 브라스, 스트링, 플루트, 보컬 멜로디 등)를 건반으로 배정!
-    """
+def analyze_track_info(track, drum_by_name=True):
+    """트랙의 이름, 채널, 프로그램, 드럼 여부 정보를 분석합니다."""
     name = ""
     channels = set()
     programs = set()
     total_notes = 0
-    has_tempo = False
 
     for msg in track:
         if msg.type == 'track_name':
             name = decode_text(msg.name)
-        elif msg.type in CONDUCTOR_META_TYPES:
-            has_tempo = True
         elif msg.type == 'program_change':
             programs.add(msg.program)
         elif msg.type in ('note_on', 'note_off'):
@@ -239,66 +168,19 @@ def analyze_track_instrument(track, drum_by_name=True):
             channels.add(msg.channel)
 
     drum_channels = track_drum_channels(track)
-    medians = channel_median_notes(track)
-    all_notes = sorted(msg.note for msg in track if is_note_on(msg))
-    median_note = all_notes[len(all_notes) // 2] if all_notes else 0
+    # 단일 채널 트랙이고 파일에 채널 10 드럼이 없을 때 트랙 이름이 드럼 키워드면 해당 채널도 드럼으로 취급
+    if drum_by_name and len(channels) == 1 and match_keyword(name, DRUM_KEYWORDS):
+        drum_channels = drum_channels | channels
 
-    info = {
+    is_drum = bool(channels & drum_channels)
+    return {
         'name': name,
         'total_notes': total_notes,
-        'has_tempo': has_tempo,
         'channels': channels,
         'programs': programs,
         'drum_channels': drum_channels,
-        'channel_medians': medians,
+        'is_drum': is_drum,
     }
-
-    # 음표가 없는 메타/템포 트랙
-    if total_notes == 0:
-        info['instrument'] = 'tempo' if has_tempo else 'empty'
-    # 1. 드럼 판별 (채널 10 / XG 드럼 킷 또는 드럼 키워드)
-    elif (channels & drum_channels) or (drum_by_name and match_keyword(name, INSTRUMENT_CONFIG['drum']['keywords'])):
-        info['instrument'] = 'drum'
-    # 2. 보컬 트랙 -> 건반 (보컬 멜로디를 기타/베이스 음색으로 찍어둔 MIDI 대비)
-    elif match_keyword(name, VOCAL_KEYWORDS):
-        info['instrument'] = 'keyboard'
-    # 3. 베이스 판별 (베이스 키워드, 또는 베이스 프로그램 32~39 이면서 실제로 낮은 음역)
-    elif match_keyword(name, INSTRUMENT_CONFIG['bass']['keywords']) or (
-            any(32 <= p <= 39 for p in programs) and median_note <= BASS_MAX_MEDIAN_NOTE):
-        info['instrument'] = 'bass'
-    # 4. 기타 판별 (기타 키워드 또는 기타 프로그램 24~31)
-    elif match_keyword(name, INSTRUMENT_CONFIG['guitar']['keywords']) or any(24 <= p <= 31 for p in programs):
-        info['instrument'] = 'guitar'
-    # 5. 그 외 모든 악기 -> 건반(Keyboard)으로 배정!
-    # (색소폰, 트럼펫, 브라스, 바이올린, 스트링, 플루트, 오보에, 보컬 멜로디, 피아노, 오르간, 신스 등)
-    else:
-        info['instrument'] = 'keyboard'
-    return info
-
-def build_conductor_track(mid):
-    """
-    모든 트랙에서 템포/박자/조성 메타 메시지를 모아 하나의 컨덕터 트랙을 만듭니다.
-    (템포가 음표가 있는 트랙에 들어 있어도 추출 파일의 재생 속도가 틀어지지 않도록)
-    """
-    events = []
-    seen = set()
-    for track in mid.tracks:
-        abs_time = 0
-        for msg in track:
-            abs_time += msg.time
-            if msg.type in CONDUCTOR_META_TYPES:
-                key = (abs_time, str(msg.copy(time=0)))
-                if key not in seen:
-                    seen.add(key)
-                    events.append((abs_time, msg))
-    events.sort(key=lambda e: e[0])
-
-    conductor = MidiTrack()
-    last = 0
-    for abs_time, msg in events:
-        conductor.append(msg.copy(time=abs_time - last))
-        last = abs_time
-    return conductor
 
 class DrumNoteMapper:
     """
@@ -333,420 +215,27 @@ class DrumNoteMapper:
         del self.owner[key]
         return [msg.copy(note=key, time=0)]
 
-def to_absolute(track):
-    """MidiTrack -> [(절대틱, 메시지)]"""
-    abs_tick = 0
-    events = []
-    for msg in track:
-        abs_tick += msg.time
-        events.append((abs_tick, msg))
-    return events
-
-def to_track(events):
-    """[(절대틱, 메시지)] -> MidiTrack (시간순 정렬, 같은 틱이면 기존 순서 유지)"""
-    track = MidiTrack()
-    last = 0
-    for abs_tick, msg in sorted(events, key=lambda e: e[0]):
-        track.append(msg.copy(time=abs_tick - last))
-        last = abs_tick
-    return track
-
-def song_timeline(mid):
-    """원곡 전체의 첫 음 시작 / 마지막 음 시작 / 마지막 음 끝 / 파일 끝 틱"""
-    first_on = last_on = last_off = None
-    song_end = 0
-    for track in mid.tracks:
-        for abs_tick, msg in to_absolute(track):
-            song_end = max(song_end, abs_tick)
-            if msg.type not in ('note_on', 'note_off'):
-                continue
-            if is_note_on(msg):
-                first_on = abs_tick if first_on is None else min(first_on, abs_tick)
-                last_on = abs_tick if last_on is None else max(last_on, abs_tick)
-            else:
-                last_off = abs_tick if last_off is None else max(last_off, abs_tick)
-    if first_on is None:
-        return None
-    if last_off is None or last_off < last_on:
-        last_off = last_on
-    return {'first_on': first_on, 'last_on': last_on, 'last_off': last_off, 'end': song_end}
-
-# 시작/끝 맞춤용 음표 세기 (소리는 거의 안 나지만 게임이 음표로 인식하도록 1)
-ANCHOR_VELOCITY = 1
-
-def align_to_song_timeline(new_mid, part_indices, timeline):
+def convert_midi_drums(mid):
     """
-    파트별로 분리하면 그 악기의 첫 음/마지막 음 기준으로 곡이 잘려서
-    파트마다 시작·종료 시간이 달라집니다. (예: Melt 드럼 253.7초, 원곡 256.7초)
-    원곡의 첫 음/마지막 음 위치에 아주 약한 음표를 넣고 파일 끝도 원곡과 맞춥니다.
+    원본 MIDI의 모든 트랙과 채널 구조를 그대로 유지하면서,
+    드럼 트랙/채널의 음표만 스타 레조넌스 인게임 건반 음계로 매핑하여 합본 MidiFile을 생성합니다.
+    반환: (new_mid, 전체 유효 음표 수, 매핑된 드럼 음표 수)
     """
-    if timeline is None or not part_indices:
-        return
-    all_events = [(i, to_absolute(new_mid.tracks[i])) for i in part_indices]
-    note_ons = [(t, m) for _, evs in all_events for t, m in evs if is_note_on(m)]
-    note_offs = [(t, m) for _, evs in all_events for t, m in evs if is_note_off(m)]
-    if not note_ons:
-        return
-    part_first_tick, part_first_msg = min(note_ons, key=lambda e: e[0])
-    part_last_tick, part_last_msg = max(note_ons, key=lambda e: e[0])
-    part_last_off = max([t for t, _ in note_offs] + [part_last_tick])
-
-    idx, events = all_events[0]
-    ch = part_first_msg.channel
-
-    # 시작 맞춤: 원곡 첫 음 위치에 이 파트의 첫 음과 같은 음 (첫 음 전에 끝나도록 짧게)
-    if part_first_tick > timeline['first_on']:
-        start = timeline['first_on']
-        off = min(start + max(1, new_mid.ticks_per_beat // 16), part_first_tick)
-        events.append((start, Message('note_on', channel=ch, note=part_first_msg.note, velocity=ANCHOR_VELOCITY)))
-        events.append((off, Message('note_off', channel=ch, note=part_first_msg.note, velocity=0)))
-
-    # 끝 맞춤: 원곡 마지막 음 위치에 이 파트의 마지막 음과 같은 음
-    if part_last_off < timeline['last_off']:
-        on = max(timeline['last_on'], part_last_off)
-        off = max(timeline['last_off'], on + 1)
-        events.append((on, Message('note_on', channel=part_last_msg.channel, note=part_last_msg.note, velocity=ANCHOR_VELOCITY)))
-        events.append((off, Message('note_off', channel=part_last_msg.channel, note=part_last_msg.note, velocity=0)))
-
-    # 파일 끝(end_of_track)도 원곡과 동일하게
-    track_end = max(t for t, _ in events) if events else 0
-    events = [(t, m) for t, m in events if m.type != 'end_of_track']
-    events.append((max(timeline['end'], track_end), MetaMessage('end_of_track')))
-    new_mid.tracks[idx] = to_track(events)
-
-# ===== 간소화(화음/트랙 줄이기) 설정 =====
-# 파트별 동시에 누르는 최대 음 수 (None = 제한 없음)
-SIMPLIFY_MAX_NOTES = {'drum': None, 'guitar': 3, 'bass': 1, 'keyboard': 3}
-SIMPLIFY_DROP = 99  # 이 우선순위는 아예 버림
-# 트레몰로(아주 빠른 연타) 줄이기: 이 박자보다 촘촘한 타격이 TREMOLO_MIN_HITS번 이상 이어지면
-# 그 구간만 TREMOLO_KEEP_BEATS 간격(0.25 = 16분음표)으로 솎아냄. 보통 속주(16·32분음표)는 그대로.
-TREMOLO_MAX_GAP_BEATS = 1 / 12
-TREMOLO_MIN_HITS = 4
-TREMOLO_KEEP_BEATS = 0.25
-
-def simplify_tier(inst_key, program, is_melody):
-    """
-    간소화 시 음표 우선순위 (숫자가 작을수록 중요)
-    0: 멜로디(보컬 라인)  1: 멜로디가 쉬는 마디의 리드(솔로)  2: 피아노/건반  3: 신스·브라스·리드 등  4: 현악·코러스
-    SIMPLIFY_DROP: 패드/효과음/민속악기/SFX (GM 88~127) -> 버림
-    """
-    if is_melody:
-        return 0
-    if inst_key != 'keyboard' or program is None:
-        return 2
-    if program >= 88:
-        return SIMPLIFY_DROP
-    if program <= 23:
-        return 2
-    if 40 <= program <= 55:
-        return 4
-    return 3
-
-def detect_melody_sources(mid, drum_by_name):
-    """
-    건반 파트에서 멜로디(보컬 라인)를 치는 (트랙 번호, 채널) 찾기
-    1순위: 이름이 보컬인 트랙
-    2순위: 한 음씩만 치는(단선율) 고음역 채널 중 음표가 가장 많은 것
-    """
-    vocal = set()
-    candidates = []
-    for idx, track in enumerate(mid.tracks):
-        info = analyze_track_instrument(track, drum_by_name)
-        if info['total_notes'] == 0:
-            continue
-        drum_chs = info['drum_channels']
-        if match_keyword(info['name'], VOCAL_KEYWORDS):
-            vocal |= {(idx, ch) for ch in info['channels'] if ch not in drum_chs}
-            continue
-        first_program = {}
-        active = {}
-        stats = {}
-        for msg in track:
-            if msg.type == 'program_change':
-                first_program.setdefault(msg.channel, msg.program)
-            elif msg.type in ('note_on', 'note_off') and msg.channel not in drum_chs:
-                st = stats.setdefault(msg.channel, {'notes': [], 'poly': 0})
-                held = active.setdefault(msg.channel, set())
-                if is_note_on(msg):
-                    held.add(msg.note)
-                    st['notes'].append(msg.note)
-                    st['poly'] += len(held)
-                else:
-                    held.discard(msg.note)
-        for ch, st in stats.items():
-            prog = first_program.get(ch)
-            if prog is not None and (classify_program(prog) in ('guitar', 'bass') or prog >= 88):
-                continue
-            if prog is None and info['instrument'] in ('guitar', 'bass', 'drum'):
-                continue
-            ns = sorted(st['notes'])
-            if not ns:
-                continue
-            median = ns[len(ns) // 2]
-            avg_poly = st['poly'] / len(ns)
-            if avg_poly <= 1.2 and 55 <= median <= 90:
-                candidates.append((len(ns), idx, ch))
-    if vocal:
-        return vocal
-    if candidates:
-        _, idx, ch = max(candidates)
-        return {(idx, ch)}
-    return set()
-
-# 멜로디가 길게 끄는 음을 끊고 들어갈 수 있는 솔로의 최소 음표 수 (마디당)
-SOLO_MIN_NOTES_PER_BAR = 8
-
-def assign_bar_leads(events, ticks_per_bar, tolerance):
-    """
-    메인 멜로디가 쉬는 마디(간주, 솔로, 인트로)에서는 그 마디의 리드 라인을 멜로디로 승격합니다.
-    - 마디 안에서 음표가 충분히 많은 트랙 중 음이 가장 높은 트랙 = 리드
-    - 리드와 거의 같은 타이밍에 같은 라인을 치는 트랙(더블링/에코)도 함께 리드
-    예: Pretender 81~88마디 솔로는 Square Lead(ch6)와 Saw Lead(ch11)가 10틱 차이로 같은 라인을 침
-    """
-    ons = [e for e in events if e[2] == 'on' and e[6] < SIMPLIFY_DROP]
-    by_bar = {}
-    for e in ons:
-        if e[6] != 0:
-            by_bar.setdefault(e[0] // ticks_per_bar, {}).setdefault(e[3][:2], []).append((e[0], e[4]))
-
-    # 마디별로 메인 멜로디가 실제로 울리는 시간 비율
-    melody_on = {}
-    melody_cover = {}
-    melody_tail_bars = set()  # 앞 마디의 멜로디 꼬리음이 걸쳐 있는 마디
-    for e in sorted(events, key=lambda e: (e[0], e[1])):
-        if e[6] == 0 and e[2] == 'on':
-            melody_on[e[3]] = e[0]
-        elif e[2] == 'off' and e[3] in melody_on:
-            start, end = melody_on.pop(e[3]), e[0]
-            for bar in range(start // ticks_per_bar + 1, (end - 1) // ticks_per_bar + 1):
-                melody_tail_bars.add(bar)
-            # 앞 마디에서 이어져 길게 끄는 꼬리음은 '노래 중'으로 치지 않음 (시작한 마디만 계산)
-            end = min(end, (start // ticks_per_bar + 1) * ticks_per_bar)
-            while start < end:
-                bar = start // ticks_per_bar
-                seg_end = min(end, (bar + 1) * ticks_per_bar)
-                melody_cover[bar] = melody_cover.get(bar, 0) + seg_end - start
-                start = seg_end
-
-    leads = {}
-    for bar, sources in by_bar.items():
-        if melody_cover.get(bar, 0) >= ticks_per_bar * 0.25:
-            continue  # 메인 멜로디가 노래하는 마디
-        most = max(len(v) for v in sources.values())
-        cands = []
-        for src, notes in sources.items():
-            if len(notes) >= max(2, most * 0.25):
-                pitches = sorted(n for _, n in notes)
-                cands.append((pitches[len(pitches) // 2], len(notes), src))
-        if not cands:
-            continue
-        best_median, best_count, best = max(cands)
-        if bar in melody_tail_bars and best_count < SOLO_MIN_NOTES_PER_BAR:
-            continue  # 멜로디가 길게 끄는 중에는 촘촘한 솔로만 끼어들 수 있음
-        best_ticks = [t for t, _ in sources[best]]
-        chosen = {best}
-        for median, _, src in cands:
-            if src == best or abs(median - best_median) > 12:
-                continue
-            notes = sources[src]
-            matched = sum(1 for t, _ in notes if any(abs(t - bt) <= tolerance for bt in best_ticks))
-            if matched >= 0.8 * len(notes):
-                chosen.add(src)  # 같은 라인을 겹쳐 치는 트랙
-        leads[bar] = chosen
-
-    promoted = []
-    for e in events:
-        if e[2] == 'on' and e[6] < SIMPLIFY_DROP and e[3][:2] in leads.get(e[0] // ticks_per_bar, ()):
-            e = e[:6] + (1,)
-        promoted.append(e)
-    return promoted
-
-def thin_tremolos(events, ticks_per_beat, dup_window):
-    """
-    예: Pretender 솔로의 3:41, 3:44, 3:51 부근은 1/16박 간격(64분음표)으로 같은 음을 수십 번 연타함
-    -> 그 구간만 16분음표 간격으로 줄임
-    """
-    max_gap = max(dup_window + 1, int(ticks_per_beat * TREMOLO_MAX_GAP_BEATS))
-    keep_gap = int(ticks_per_beat * TREMOLO_KEEP_BEATS)
-    ticks = sorted({e[0] for e in events if e[2] == 'on' and e[6] < SIMPLIFY_DROP})
-    # 더블링/에코(dup_window 이내)는 한 번의 타격으로 봄
-    hits = []
-    for t in ticks:
-        if not hits or t - hits[-1] > dup_window:
-            hits.append(t)
-
-    drop_hits = set()
-    run = [hits[0]] if hits else []
-    for t in hits[1:] + [None]:
-        if t is not None and t - run[-1] <= max_gap:
-            run.append(t)
-            continue
-        if len(run) >= TREMOLO_MIN_HITS:
-            last_kept = None
-            for h in run:
-                if last_kept is not None and h - last_kept < keep_gap:
-                    drop_hits.add(h)
-                else:
-                    last_kept = h
-        if t is not None:
-            run = [t]
-    if not drop_hits:
-        return events
-
-    dropped_ticks = sorted(drop_hits)
-    import bisect
-
-    def is_dropped(tick):
-        i = bisect.bisect_left(dropped_ticks, tick - dup_window)
-        return i < len(dropped_ticks) and dropped_ticks[i] <= tick
-
-    return [e[:6] + (SIMPLIFY_DROP,) if e[2] == 'on' and is_dropped(e[0]) else e for e in events]
-
-def reduce_polyphony(events, max_notes, low_first=False, dup_window=0, ticks_per_bar=None):
-    """
-    events: [(틱, 순서, 'on'/'off', 원본키, 음, 세기, 우선순위)]
-    - 같은 순간(dup_window 틱 이내) 같은 음은 한 번만 (여러 트랙 더블링/에코 합치기)
-    - 동시에 max_notes개까지만 (우선순위 높은 음 우선, 같은 우선순위면 맨 위/맨 아래 음 우선)
-    - 자리가 없으면 더 낮은 우선순위(또는 먼저 눌려 있던 같은 우선순위) 음을 떼고 새 음을 누름
-    - 멜로디(우선순위 0)가 울리는 동안 반주는 멜로디보다 높은 음을 치지 않음 (멜로디가 항상 맨 위)
-    반환: [(틱, Message)], 버린 음표 수
-    """
-    out = []
-    dropped = 0
-    active = {}      # 음 -> (원본키, 우선순위, 누른 틱)
-    accepted = {}    # 원본키 -> 음
-    events = sorted(events, key=lambda e: (e[0], 0 if e[2] == 'off' else 1, e[1]))
-
-    def order_chord(cands):
-        by_tier = {}
-        for c in cands:
-            by_tier.setdefault(c[6], []).append(c)
-        ordered = []
-        for tier in sorted(by_tier):
-            group = sorted(by_tier[tier], key=lambda c: c[4], reverse=not low_first)
-            if len(group) > 2 and not low_first:
-                group = [group[0], group[-1]] + group[1:-1]  # 맨 위(멜로디) + 맨 아래(근음) 먼저
-            ordered += group
-        return ordered
-
-    i = 0
-    while i < len(events):
-        tick = events[i][0]
-        j = i
-        while j < len(events) and events[j][0] == tick:
-            j += 1
-        batch = events[i:j]
-        for e in batch:
-            if e[2] != 'off':
-                continue
-            pitch = accepted.pop(e[3], None)
-            if pitch is not None and active.get(pitch, (None,))[0] == e[3]:
-                del active[pitch]
-                out.append((tick, Message('note_off', note=pitch, velocity=0)))
-        for c in order_chord([e for e in batch if e[2] == 'on']):
-            _, _, _, src, pitch, vel, tier = c
-            if tier >= SIMPLIFY_DROP:
-                dropped += 1
-                continue
-            if tier == 1 and ticks_per_bar:
-                # 솔로가 시작되면 앞 마디에서 이어져 울리는 멜로디 꼬리음은 뗌
-                bar_start = tick - tick % ticks_per_bar
-                for p in [p for p, (_, t, since) in active.items() if t == 0 and since < bar_start and p < pitch]:
-                    accepted.pop(active[p][0], None)
-                    del active[p]
-                    out.append((tick, Message('note_off', note=p, velocity=0)))
-            melody_pitches = [p for p, (_, t, _) in active.items() if t == 0]
-            if tier != 0 and melody_pitches and pitch > min(melody_pitches):
-                dropped += 1  # 멜로디보다 높은 반주음
-                continue
-            if tier == 0:
-                # 새 멜로디 음보다 높게 울리고 있는 반주음은 뗌
-                for p in [p for p, (_, t, _) in active.items() if t != 0 and p > pitch]:
-                    accepted.pop(active[p][0], None)
-                    del active[p]
-                    out.append((tick, Message('note_off', note=p, velocity=0)))
-            if pitch in active:
-                if active[pitch][1] == 0 and tier != 0:
-                    dropped += 1  # 멜로디가 누르고 있는 음을 반주가 빼앗지 않음
-                    continue
-                if tick - active[pitch][2] <= dup_window:
-                    dropped += 1  # 같은 순간 같은 음 중복
-                    continue
-                accepted.pop(active[pitch][0], None)
-                out.append((tick, Message('note_off', note=pitch, velocity=0)))
-                del active[pitch]
-            elif max_notes is not None and len(active) >= max_notes:
-                victims = [(t, -since, p) for p, (_, t, since) in active.items()
-                           if since < tick and (t > tier or t == tier)]
-                if not victims:
-                    dropped += 1
-                    continue
-                _, _, vp = max(victims)
-                accepted.pop(active[vp][0], None)
-                del active[vp]
-                out.append((tick, Message('note_off', note=vp, velocity=0)))
-            active[pitch] = (src, tier, tick)
-            accepted[src] = pitch
-            out.append((tick, Message('note_on', note=pitch, velocity=vel)))
-        i = j
-    return out, dropped
-
-def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True, simplify=False):
-    """지정된 단일 악기(drum, guitar, bass, keyboard)를 추출하여 새 MidiFile 객체 생성"""
-    cfg = INSTRUMENT_CONFIG[inst_key]
-    new_mid = MidiFile(type=1)
+    new_mid = MidiFile(type=mid.type)
     new_mid.ticks_per_beat = mid.ticks_per_beat
 
-    conductor = build_conductor_track(mid)
-    if len(conductor) > 0:
-        new_mid.tracks.append(conductor)
-
-    total_notes_extracted = 0
-    total_mapped = 0
-    part_indices = []
-    # 채널 10 드럼이 있는 파일이면 트랙 이름만으로 드럼 판정하지 않음
-    # (이름 때문에 멜로디 트랙이 드럼 파일에 섞여 들어가는 것 방지)
+    total_notes = 0
+    mapped_drum_notes = 0
     drum_by_name = not file_has_drum_channel(mid)
 
-    # 간소화: 모든 트랙의 음표를 모아서 한 트랙으로 정리 (드럼은 제외)
-    simplify = simplify and SIMPLIFY_MAX_NOTES.get(inst_key) is not None
-    collected = []
-    melody_sources = detect_melody_sources(mid, drum_by_name) if simplify and inst_key == 'keyboard' else set()
-
-    for track_idx, track in enumerate(mid.tracks):
-        info = analyze_track_instrument(track, drum_by_name)
-        if info['total_notes'] == 0:
-            continue
-
-        track_inst = info['instrument']
-        # 여러 채널이 섞인 트랙(Type 0 MIDI 등)은 채널별로 악기를 판별
-        per_channel = len(info['channels']) > 1
-        if not per_channel and track_inst != inst_key:
-            continue
-
-        channel_program = {}  # 채널별 현재 프로그램 번호
+    for track in mid.tracks:
+        info = analyze_track_info(track, drum_by_name)
         drum_chs = info['drum_channels']
-        medians = info['channel_medians']
-
-        def channel_matches(ch):
-            if not per_channel:
-                return True
-            if ch in drum_chs:
-                return inst_key == 'drum'
-            if ch in channel_program:
-                inst = classify_program(channel_program[ch])
-                if inst == 'bass' and medians.get(ch, 0) > BASS_MAX_MEDIAN_NOTE:
-                    inst = 'keyboard'  # 베이스 음색이지만 높은 음역 화음 -> 신스
-                return inst == inst_key
-            # 프로그램 정보가 없는 채널은 트랙 판별 결과를 따름
-            fallback = track_inst if track_inst != 'drum' else 'keyboard'
-            return fallback == inst_key
+        mappers = {}  # 채널별 DrumNoteMapper
 
         new_track = MidiTrack()
-        mapper = DrumNoteMapper() if cfg['remap_drums'] else None
         abs_tick = 0
         last_written_tick = 0
-        has_valid_note = False
 
         def emit(m):
             nonlocal last_written_tick
@@ -756,100 +245,54 @@ def extract_single_instrument(mid, inst_key, force_ch0=True, align_timeline=True
         for msg in track:
             abs_tick += msg.time
 
-            if msg.is_meta:
-                # 템포 계열은 컨덕터 트랙으로 이동, end_of_track은 저장 시 자동 생성
-                if msg.type not in CONDUCTOR_META_TYPES and msg.type != 'end_of_track':
-                    emit(msg)
-                continue
-
-            if msg.type == 'program_change':
-                channel_program[msg.channel] = msg.program
-
-            if not hasattr(msg, 'channel'):
-                # sysex 등 채널이 없는 메시지는 단일 악기 트랙에서만 유지
-                if not per_channel:
-                    emit(msg)
-                continue
-
-            if not channel_matches(msg.channel):
-                continue
-
-            out_msgs = [msg]
-            if msg.type in ('note_on', 'note_off'):
-                if mapper is not None:
-                    out_msgs = mapper.process(msg, abs_tick)
-                    if is_note_on(msg) and get_mapped_drum_note(msg.note) is None:
-                        continue  # 버려진 음표는 개수에 포함하지 않음
-                    if is_note_on(msg):
-                        total_mapped += 1
+            if msg.type in ('note_on', 'note_off') and msg.channel in drum_chs:
+                mapper = mappers.setdefault(msg.channel, DrumNoteMapper())
+                out_msgs = mapper.process(msg, abs_tick)
                 if is_note_on(msg):
-                    total_notes_extracted += 1
-                    has_valid_note = True
+                    if get_mapped_drum_note(msg.note) is None:
+                        continue  # 버려진 드럼 음표는 개수에 포함하지 않음
+                    mapped_drum_notes += 1
+                    total_notes += 1
+                for out in out_msgs:
+                    emit(out)
+            else:
+                if msg.type in ('note_on', 'note_off') and is_note_on(msg):
+                    total_notes += 1
+                emit(msg)
 
-            if simplify:
-                if msg.type in ('note_on', 'note_off'):
-                    prog = channel_program.get(msg.channel, min(info['programs']) if info['programs'] else None)
-                    tier = simplify_tier(inst_key, prog, (track_idx, msg.channel) in melody_sources)
-                    kind = 'on' if is_note_on(msg) else 'off'
-                    collected.append((abs_tick, len(collected), kind, (track_idx, msg.channel, msg.note),
-                                      msg.note, getattr(msg, 'velocity', 0), tier))
-                continue
+        new_mid.tracks.append(new_track)
 
-            for out in out_msgs:
-                if force_ch0:
-                    out = out.copy(channel=0)
-                emit(out)
+    return new_mid, total_notes, mapped_drum_notes
 
-        if simplify:
-            continue
-        if has_valid_note:
-            part_indices.append(len(new_mid.tracks))
-            new_mid.tracks.append(new_track)
+CONVERTED_SUFFIX = '_converted'
 
-    if simplify and collected:
-        dup_window = max(1, mid.ticks_per_beat // 24)
-        if inst_key == 'keyboard':
-            collected = assign_bar_leads(collected, mid.ticks_per_beat * 4, dup_window)
-        collected = thin_tremolos(collected, mid.ticks_per_beat, dup_window)
-        reduced, _ = reduce_polyphony(collected, SIMPLIFY_MAX_NOTES[inst_key],
-                                      low_first=(inst_key == 'bass'), dup_window=dup_window,
-                                      ticks_per_bar=mid.ticks_per_beat * 4)
-        total_notes_extracted = sum(1 for _, m in reduced if m.type == 'note_on')
-        if total_notes_extracted:
-            track = MidiTrack([MetaMessage('track_name', name=cfg['suffix'].strip(' ()'))])
-            events = [(0, track[0])] + [(t, m) for t, m in reduced]
-            track = to_track(events)
-            part_indices.append(len(new_mid.tracks))
-            new_mid.tracks.append(track)
-
-    if align_timeline:
-        align_to_song_timeline(new_mid, part_indices, song_timeline(mid))
-
-    return new_mid, total_notes_extracted, total_mapped
-
-def output_file_name(cfg, song_name, ext):
-    """결과 파일 이름: '(Drum)__곡명.mid' (밑줄 사이에 곡 번호를 끼워 넣을 수 있게 두 개)"""
-    return f"{cfg['suffix'].strip()}__{song_name}{ext}"
-
-# 결과 파일 이름 앞에 붙는 악기 표시: '(Drum)__곡명', '(Drum)_01_곡명', '(Drum)_곡명'
+# 예전 버전 결과 파일 이름 앞/뒤에 붙던 악기 표시: '(Drum)__곡명', '(Drum)_01_곡명', '곡명 (Drum)'
+LEGACY_PART_NAMES = ('(Drum)', '(Guitar)', '(Bass)', '(Keyboard)')
 PART_PREFIX = re.compile(
-    '^(?:' + '|'.join(re.escape(cfg['suffix'].strip()) for cfg in INSTRUMENT_CONFIG.values()) + r')_(?:\d+_|_)?')
+    '^(?:' + '|'.join(re.escape(p) for p in LEGACY_PART_NAMES) + r')_(?:\d+_|_)?')
+
+def output_file_name(song_name, ext):
+    """결과 파일 이름: '곡명_converted.mid'"""
+    return f"{song_name}{CONVERTED_SUFFIX}{ext}"
 
 def strip_part_labels(base_name):
     """
-    결과 파일 이름에서 악기 표시를 모두 제거하고 곡명만 남김
-    (앞에 붙는 '(Drum)__' / '(Drum)_01_' 과 예전 방식인 뒤에 붙는 ' (Drum)')
+    결과 파일 이름에서 '_converted' 또는 예전 악기 표시를 모두 제거하고 곡명만 남김
     """
     changed = True
     while changed:
         changed = False
+        if base_name.lower().endswith(CONVERTED_SUFFIX):
+            base_name = base_name[:-len(CONVERTED_SUFFIX)]
+            changed = True
         stripped = PART_PREFIX.sub('', base_name)
         if stripped != base_name:
             base_name = stripped
             changed = True
-        for cfg in INSTRUMENT_CONFIG.values():
-            if base_name.endswith(cfg['suffix']):
-                base_name = base_name[:-len(cfg['suffix'])]
+        for p in LEGACY_PART_NAMES:
+            suffix = f" {p}"
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
                 changed = True
     return base_name
 
@@ -951,10 +394,10 @@ def load_midi(input_path):
 MIDI_EXTS = ('.mid', '.midi')
 INPUT_EXTS = MIDI_EXTS + SCORE_EXTS + AUDIO_EXTS
 
-def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simplify=True, log=print, score_bpm=None):
+def convert_file(input_path, log=print, score_bpm=None):
     """
-    밴드스코어에서 사용자가 선택한 악기 목록(drum, guitar, bass, keyboard)을 각각 추출하여 저장합니다.
-    MIDI 외에 PDF 악보 / MusicXML / 음원(MP3 등)도 받습니다 (결과는 항상 .mid).
+    MIDI / PDF 악보 / MusicXML / 음원(MP3 등)을 받아 드럼만 인게임 건반 음계로 매핑한 뒤
+    하나로 합쳐진 합본 MIDI 파일('곡명_converted.mid')로 저장합니다.
     score_bpm: 악보에서 템포를 읽지 못했을 때 쓸 템포
     """
     if not os.path.exists(input_path):
@@ -975,47 +418,38 @@ def extract_selected_instruments(input_path, selected_keys, force_ch0=True, simp
             print(f"⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다: {os.path.basename(input_path)}")
     out_base = strip_part_labels(base_name)
 
-    results = []
-    for inst_key in selected_keys:
-        if inst_key not in INSTRUMENT_CONFIG:
-            continue
-        cfg = INSTRUMENT_CONFIG[inst_key]
-        new_mid, total_notes, mapped_notes = extract_single_instrument(mid, inst_key, force_ch0=force_ch0, simplify=simplify)
+    new_mid, total_notes, mapped_notes = convert_midi_drums(mid)
+    if total_notes <= 0:
+        print("트랙 또는 음표가 감지되지 않아 건너뜁니다.")
+        return None
 
-        # 노트가 1개 이상 추출된 경우에만 파일 저장
-        if total_notes > 0:
-            output_path = os.path.join(dir_name, output_file_name(cfg, out_base, ext))
-            # 원본 파일을 덮어쓰지 않음 (드럼 매핑이 이중으로 적용되는 것 방지)
-            if os.path.normcase(os.path.abspath(output_path)) == os.path.normcase(os.path.abspath(input_path)):
-                print(f"[{cfg['name']}] 원본 파일과 저장 경로가 같아 건너뜁니다: {file_name}")
-                continue
-            new_mid.save(output_path)
-            results.append({
-                'key': inst_key,
-                'name': cfg['name'],
-                'path': output_path,
-                'total_notes': total_notes,
-                'mapped_notes': mapped_notes,
-                'is_drum': cfg['remap_drums']
-            })
-            print(f"[{cfg['name']}] 추출 완료 ({total_notes}개 음표): {os.path.basename(output_path)}")
-        else:
-            print(f"[{cfg['name']}] 트랙 또는 음표가 감지되지 않아 건너뜁니다.")
+    output_path = os.path.join(dir_name, output_file_name(out_base, ext))
+    # 원본 파일을 덮어쓰지 않음 (드럼 매핑이 이중으로 적용되는 것 방지)
+    if os.path.normcase(os.path.abspath(output_path)) == os.path.normcase(os.path.abspath(input_path)):
+        print(f"원본 파일과 저장 경로가 같아 건너뜁니다: {file_name}")
+        return None
 
-    return results
+    new_mid.save(output_path)
+    print(f"[합본 변환 완료] {os.path.basename(output_path)} (전체 음표: {total_notes}개, 드럼 매핑: {mapped_notes}개)")
+    return {
+        'path': output_path,
+        'total_notes': total_notes,
+        'mapped_notes': mapped_notes,
+    }
 
 def print_analysis(input_path):
-    """트랙별 판별 결과 출력 (어떤 트랙이 어떤 악기로 분류되는지 확인용)"""
+    """트랙별 정보 출력 (어떤 트랙이 드럼으로 인식되는지 확인용)"""
     mid, repaired = load_midi(input_path)
     if repaired:
         print("⚠️ 규격에 맞지 않는 데이터가 있어 자동 복구해서 읽었습니다.")
     drum_by_name = not file_has_drum_channel(mid)
     print(f"파일: {os.path.basename(input_path)} (Type {mid.type}, {len(mid.tracks)}개 트랙, TPB {mid.ticks_per_beat})")
     for idx, track in enumerate(mid.tracks):
-        info = analyze_track_instrument(track, drum_by_name)
+        info = analyze_track_info(track, drum_by_name)
         notes = [m.note for m in track if is_note_on(m)]
         note_range = f"{min(notes)}~{max(notes)}" if notes else "-"
-        print(f"  [{idx}] {info['name'] or '(이름 없음)'!r}: {info['instrument']} | "
+        role = 'drum (음계 매핑 대상)' if info['is_drum'] else ('melodic (원음 유지)' if info['total_notes'] > 0 else 'meta/empty')
+        print(f"  [{idx}] {info['name'] or '(이름 없음)'!r}: {role} | "
               f"음표 {info['total_notes']}개 (범위 {note_range}) | "
               f"채널 {sorted(info['channels'])} | 프로그램 {sorted(info['programs'])}")
 
@@ -1024,17 +458,16 @@ if __name__ == "__main__":
         for arg in sys.argv[2:]:
             print_analysis(arg)
     elif len(sys.argv) > 1:
-        print("="*65)
-        print("🎸 밴드스코어 악기 선택 추출기 (기타 / 베이스 / 건반 / 드럼)")
-        print("   * 드럼: 스타 레조넌스 음계 이동 적용")
-        print("   * 기타/베이스/건반: 원본 음계 보존")
-        print("="*65)
+        print("=" * 65)
+        print("🎼 스타 레조넌스 합본 MIDI 변환기 (드럼 인게임 음계 매핑)")
+        print("   * 드럼: 스타 레조넌스 인게임 건반 노트로 자동 변환")
+        print("   * 기타/베이스/건반 등: 원본 트랙·채널·음계 그대로 유지")
+        print("=" * 65)
         for arg in sys.argv[1:]:
             if os.path.exists(arg) and arg.lower().endswith(INPUT_EXTS):
                 print(f"\n처리 중: {os.path.basename(arg)}")
-                # CLI 기본값: 4대 악기 모두 추출
                 try:
-                    extract_selected_instruments(arg, ['drum', 'guitar', 'bass', 'keyboard'])
+                    convert_file(arg)
                 except Exception as e:
                     print(f"오류 발생: {e}")
         input("\n[Enter 키를 누르면 종료됩니다...]")
