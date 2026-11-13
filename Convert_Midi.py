@@ -18,8 +18,8 @@ from Convert_Audio import AUDIO_EXTS
 # W  = D5 (74) : 미드 탐 (Mid Tom)
 # E  = E5 (76) : 하이 탐 (High Tom)
 # H  = A4 (69) : 플로어 탐 (Floor Tom) ★ (A4#인 70번=0번키가 아닌 A4=69번=H키!)
-# R  = F5 (77) : 크래시 심벌 1 (Crash Cymbal 1 / China / Splash)
-# Y  = A5 (81) : 라이드 심벌 / 크래시 2 (Ride Cymbal / Crash 2)
+# R  = F5 (77) : 라이드 심벌 (Ride Cymbal)
+# Y  = A5 (81) : 크래시 심벌 (Crash Cymbal / China / Splash)
 
 DRUM_MAP = {
     # 베이스 드럼 계열 -> F4 (인게임 F키 = 65)
@@ -40,20 +40,20 @@ DRUM_MAP = {
     # 탐(Tom) 계열
     41: 69,  # Low Floor Tom  -> A4 (인게임 H키 = 69) ★ A4#인 70(0번키)이 아닌 69(H키)!
     43: 69,  # High Floor Tom -> A4 (인게임 H키 = 69)
-    45: 74,  # Low Tom        -> D5 (인게임 W키 = 74)
+    45: 69,  # Low Tom (플로어 탐) -> A4 (인게임 H키 = 69)
     47: 74,  # Low-Mid Tom    -> D5 (인게임 W키 = 74)
     48: 74,  # Hi-Mid Tom     -> D5 (인게임 W키 = 74)
     50: 76,  # High Tom       -> E5 (인게임 E키 = 76)
     58: 76,  # Vibra-Slap     -> E5 (인게임 E키 = 76)
     
-    # 심벌(Cymbal) 계열 -> F5 (인게임 R키 = 77) / A5 (인게임 Y키 = 81)
-    49: 77,  # Crash Cymbal 1 -> F5 (인게임 R키 = 77)
-    52: 77,  # Chinese Cymbal -> F5 (인게임 R키 = 77)
-    55: 77,  # Splash Cymbal  -> F5 (인게임 R키 = 77)
-    57: 77,  # Crash Cymbal 2 -> F5 (인게임 R키 = 77)
-    51: 81,  # Ride Cymbal 1  -> A5 (인게임 Y키 = 81)
-    53: 81,  # Ride Bell      -> A5 (인게임 Y키 = 81)
-    59: 81,  # Ride Cymbal 2  -> A5 (인게임 Y키 = 81)
+    # 심벌(Cymbal) 계열 -> 라이드 F5 (인게임 R키 = 77) / 크래시 A5 (인게임 Y키 = 81)
+    49: 81,  # Crash Cymbal 1 -> A5 (인게임 Y키 = 81)
+    52: 81,  # Chinese Cymbal -> A5 (인게임 Y키 = 81)
+    55: 81,  # Splash Cymbal  -> A5 (인게임 Y키 = 81)
+    57: 81,  # Crash Cymbal 2 -> A5 (인게임 Y키 = 81)
+    51: 77,  # Ride Cymbal 1  -> F5 (인게임 R키 = 77)
+    53: 77,  # Ride Bell      -> F5 (인게임 R키 = 77)
+    59: 77,  # Ride Cymbal 2  -> F5 (인게임 R키 = 77)
 
     # 기타 확장 타악기
     27: 72, 28: 72, 29: 72, 30: 72, 31: 72,  # Laser/Slap/Scratch/Sticks -> Q키 (스네어/스틱)

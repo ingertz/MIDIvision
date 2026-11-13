@@ -193,7 +193,7 @@ class MidiConverterGUI(*_GUI_BASES):
         mapping_text = (
             "• 킥: F4 [ F ]    • 스네어: C5 [ Q ]    • 하이햇: D4 [ S ], 오픈: G5 [ T ]\n"
             "• 탐: 미드 D5 [ W ], 하이 E5 [ E ], 플로어 A4 [ H ] (★ 0번키 방지 정밀 매핑)\n"
-            "• 심벌: 크래시 F5 [ R ], 라이드 A5 [ Y ]"
+            "• 심벌: 라이드 F5 [ R ], 크래시 A5 [ Y ]"
         )
         mapping_label = ctk.CTkLabel(
             info_frame,
